@@ -1,0 +1,7 @@
+*.nsys-rep
+*.sqlite
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+*.egg-info/
