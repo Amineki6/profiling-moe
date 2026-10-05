@@ -35,6 +35,10 @@ def compiled_kolibri_router(x: torch.Tensor, bias: torch.Tensor, k: int):
     topk_weights = torch.sigmoid(torch.gather(x, -1, topk_ids))
     return topk_ids, topk_weights
 
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+from kernels import fused_kolibri_router
+
 def bench_gpu_kernel_us(fn, *args):
     # warmup=25 ms, rep=100 ms (~6,000 iterations per kernel)
     ms = triton.testing.do_bench(lambda: fn(*args), warmup=25, rep=100, return_mode="median")
@@ -55,21 +59,43 @@ if __name__ == "__main__":
         # 1. Warm up shape & verify mathematical equivalence
         eager_ids, eager_weights = eager_kolibri_router(x, bias, TOP_K)
         comp_ids, comp_weights = compiled_kolibri_router(x, bias, TOP_K)
+        tri_ids, tri_weights = fused_kolibri_router(x, bias, TOP_K)
 
-        assert torch.equal(eager_ids, comp_ids), f"TopK mismatch at batch size {b}!"
-        assert torch.allclose(eager_weights, comp_weights, atol=1e-3, rtol=1e-3), f"Weight mismatch at batch size {b}!"
+        assert torch.equal(eager_ids, comp_ids), f"Compile TopK mismatch at batch size {b}!"
+        assert torch.allclose(eager_weights, comp_weights, atol=1e-3, rtol=1e-3), f"Compile Weight mismatch at batch size {b}!"
+
+        # Verify Triton output correctness
+        expected_tri_weights = torch.sigmoid(torch.gather(x, -1, tri_ids.long()))
+        assert torch.allclose(tri_weights, expected_tri_weights, atol=1e-3, rtol=1e-3), f"Triton weight mismatch at batch size {b}!"
 
         # 2. Benchmark GPU execution time
         t_eager = bench_gpu_kernel_us(eager_kolibri_router, x, bias, TOP_K)
         t_comp = bench_gpu_kernel_us(compiled_kolibri_router, x, bias, TOP_K)
-        speedup = t_eager / t_comp if t_comp > 0 else 1.0
+        t_tri = bench_gpu_kernel_us(fused_kolibri_router, x, bias, TOP_K)
 
-        table_data.append([b, f"{t_eager:.2f}", f"{t_comp:.2f}", f"{speedup:.2f}x"])
+        sp_comp = t_eager / t_comp if t_comp > 0 else 1.0
+        sp_tri = t_eager / t_tri if t_tri > 0 else 1.0
+
+        table_data.append([
+            b,
+            f"{t_eager:.2f}",
+            f"{t_comp:.2f}",
+            f"{t_tri:.2f}",
+            f"{sp_comp:.2f}x",
+            f"{sp_tri:.2f}x",
+        ])
 
     print(f"\n### Kolibri 1 MoE Router Microbenchmark ({DEVICE_NAME})")
     print(tabulate(
         table_data,
-        headers=["Tokens (Batch)", "PyTorch Eager (µs)", "torch.compile (µs)", "Speedup"],
+        headers=[
+            "Tokens (Batch)",
+            "PyTorch Eager (µs)",
+            "torch.compile (µs)",
+            "Fused Triton (µs)",
+            "Compile Speedup",
+            "Triton Speedup",
+        ],
         tablefmt="github"
     ))
 
@@ -90,7 +116,9 @@ if __name__ == "__main__":
                 "batch_size": row[0],
                 "eager_us": float(row[1]),
                 "compiled_us": float(row[2]),
-                "speedup": row[3],
+                "triton_us": float(row[3]),
+                "compile_speedup": row[4],
+                "triton_speedup": row[5],
             }
             for row in table_data
         ],

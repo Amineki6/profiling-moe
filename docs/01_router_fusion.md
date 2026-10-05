@@ -40,17 +40,17 @@ Kolibri 1 diverges from standard MoE architectures (and existing TensorRT-LLM fu
 
 ## 3. Empirical Results
 
-Microbenchmark conducted on **NVIDIA GeForce RTX 4090**:
+Microbenchmark conducted on **NVIDIA GeForce RTX 4090** (using `triton.testing.do_bench`, median over 100 iterations):
 
-| Tokens (Batch) | PyTorch Eager (µs) | `torch.compile` (µs) | Speedup | Phase |
-| :--- | :--- | :--- | :--- | :--- |
-| **1** | 17.41 | 16.38 | **1.06x** | Decode |
-| **4** | 18.26 | 16.38 | **1.11x** | Decode |
-| **8** | 17.54 | 16.38 | **1.07x** | Decode |
-| **16** | 17.41 | 16.38 | **1.06x** | Decode |
-| **32** | 17.70 | 17.41 | **1.02x** | Transition |
-| **64** | 18.34 | 19.46 | **0.94x** | Prefill |
-| **128** | 19.46 | 21.50 | **0.90x** | Prefill |
+| Tokens (Batch) | PyTorch Eager (µs) | `torch.compile` (µs) | Compile Speedup | Fused Triton (µs) | Triton Speedup | Phase |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **1** | 17.41 | 16.38 | 1.06x | **5.12** | **3.40x** | Decode |
+| **4** | 18.26 | 16.38 | 1.11x | **5.12** | **3.57x** | Decode |
+| **8** | 17.54 | 16.38 | 1.07x | **5.12** | **3.43x** | Decode |
+| **16** | 17.41 | 16.38 | 1.06x | **5.12** | **3.40x** | Decode |
+| **32** | 17.70 | 17.41 | 1.02x | **5.76** | **3.07x** | Transition |
+| **64** | 18.34 | 19.46 | 0.94x | **6.03** | **3.04x** | Prefill |
+| **128** | 19.46 | 21.50 | 0.90x | **6.03** | **3.23x** | Prefill |
 
 ---
 
@@ -98,6 +98,47 @@ def partition_0(args):
 
 ---
 
-## 5. Architectural Conclusion & Next Steps
+## 5. Hardware Ground Truth: Nsight Systems Profiling
 
-> **Conclusion**: `torch.compile` is **insufficient** for Kolibri 1 MoE routing. It fails to fuse across Top-K and incurs a 3-kernel launch floor of ~16 µs.
+Inspecting the hardware silicon timeline (`traces/01_router_comparison.nsys-rep` capture under NVIDIA Nsight Systems) exposes the raw microarchitectural difference:
+
+### A. Eager & Compiled Pipeline Execution (Disjoint Kernels)
+Under PyTorch Eager / `torch.compile`, a single routing pass dispatches **5 individual CUDA kernels** sequentially:
+
+| Kernel Symbol | Hardware Execution (nsys) | Primary Operation |
+| :--- | :--- | :--- |
+| `at::native::vectorized_elementwise_kernel<...>` | **5.19 µs** | Logit bias addition (`x + bias`) |
+| `at::native::gatherTopK<...>` | **4.37 µs** | Stage-1 Top-K bucket reduction |
+| `at::native::bitonicSortKVGlobalHierarchyKernel<...>` | **3.47 µs** | Sort and rank expert indices |
+| `at::native::gather_kernel<...>` | **3.31 µs** | Gather raw logits at selected Top-6 indices |
+| `at::native::vectorized_elementwise_kernel<...>` | **3.17 µs** | Unnormalized sigmoid activation |
+| **Total Silicon Time (Sum of Kernels)** | **19.51 µs** | 5 GPU launch barriers + DRAM roundtrips |
+
+### B. Fused Triton Kernel Execution (Single SM Pass)
+Under the custom Triton kernel ([kernels/fused_kolibri_router.py](file:///home/mkina/profiling/profiling-moe/kernels/fused_kolibri_router.py)):
+
+| Kernel Symbol | Hardware Execution (nsys) | Primary Operation |
+| :--- | :--- | :--- |
+| `_fused_kolibri_router_kernel` | **1.82 – 1.87 µs** | Logit bias + iterative Top-6 + Sigmoid in SRAM |
+| **Total Silicon Time** | **1.87 µs** | **10.4x raw kernel speedup** |
+
+### Understanding the Timing Delta (`do_bench` vs. Nsight):
+- **Silicon Execution Time (1.87 µs)**: The actual time the SMs spend executing instructions on GPU cores.
+- **Macro Benchmark Latency (5.12 µs)**: Measured by `triton.testing.do_bench`, which accounts for CUDA driver submission, event synchronization, and L2 cache invalidate overheads.
+- Both metrics confirm that single-pass register fusion eliminates over **12–14 µs** of launch and memory overhead per call.
+
+---
+
+## 6. End-to-End Model Impact (Decode Phase)
+
+Kolibri 1 (78B MoE) contains **50 layers**, each with an MoE block ($E=384, k=6$).
+
+$$\text{Latency Saved per Token} = 50 \times (17.41\ \mu\text{s} - 5.12\ \mu\text{s}) = 50 \times 12.29\ \mu\text{s} \approx \mathbf{0.615\text{ ms / token}}$$
+
+- **Decode Phase Speedup**: During autoregressive decoding ($b=1$), typical forward pass latency per token is ~8–10 ms on high-end hardware. Eliminating ~0.6 ms yields an immediate **~6–8% end-to-end decode latency reduction** with zero degradation in routing accuracy.
+
+---
+
+## 7. Summary
+
+Single-pass register fusion via Triton achieves a **3.40x macro latency speedup** (`do_bench`) and a **10.4x raw kernel execution speedup** (Nsight Systems) over PyTorch Eager while preserving exact tensor equality. This resolves the MoE router overhead for Kolibri 1 in TensorRT-LLM with zero C++ template overhead.

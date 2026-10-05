@@ -57,7 +57,20 @@ profiling-moe/
 
 ## Investigation Progress & Results
 
-| # | Investigation | Target Layer | Eager Baseline | `torch.compile` | Custom Kernel | Status | Deep-Dive Doc |
-|:---:|:---|:---|:---:|:---:|:---:|:---:|:---|
-| **01** | **MoE Router Fusion** | Logit Bias + Top-6 ($E=384$) | 17.41 µs | 16.38 µs (1.06x) | *In Progress* | 🔬 Investigating | [01_router_fusion.md](docs/01_router_fusion.md) |
-| **02** | **Hybrid Attention Norm** | SWA RoPE vs RNoPE | TBD | TBD | TBD | 📋 Planned | `docs/02_hybrid_attention.md` |
+| # | Investigation | Target Layer | Eager Baseline | `torch.compile` | Custom Kernel | Deep-Dive Doc |
+|:---:|:---|:---|:---:|:---:|:---:|:---|
+| **01** | **MoE Router Fusion** | Logit Bias + Top-6 ($E=384$) | 17.41 µs | 16.38 µs (1.06x) | **5.12 µs (3.40x)** (Triton) | [01_router_fusion.md](file:///home/mkina/profiling/profiling-moe/docs/01_router_fusion.md) |
+| **02** | **Hybrid Attention Norm** | SWA RoPE vs RNoPE | TBD | TBD | TBD | `docs/02_hybrid_attention.md` |
+
+---
+
+## Key Findings & Benchmark Summary
+
+### Investigation 01: MoE Router Fusion
+- **Problem**: PyTorch Eager and `torch.compile` split Kolibri's logit-space bias + Top-6 ($E=384$) + unnormalized sigmoid into 5 sequential CUDA kernels (`add`, `gatherTopK`, `bitonicSort`, `gather`, `sigmoid`), generating intermediate memory roundtrips and an irreducible ~16–19 µs launch latency floor.
+- **Solution**: Implemented a fused Triton kernel ([kernels/fused_kolibri_router.py](file:///home/mkina/profiling/profiling-moe/kernels/fused_kolibri_router.py)) that computes bias addition, iterative Top-6 extraction, and unnormalized sigmoid entirely in SRAM/registers in a single pass.
+- **Microbenchmark Results (RTX 4090)**:
+  - **Macro Latency (`do_bench`)**: Reduced from **17.41 µs** (Eager) to **5.12 µs** (**3.40x end-to-end speedup**).
+  - **Silicon Execution (Nsight Systems)**: Raw SM kernel runtime dropped from **19.51 µs** (sum of 5 kernels) to **1.87 µs** (**10.4x raw kernel speedup**).
+- **End-to-End Impact**: In Kolibri 1 (50 MoE layers), saving ~11.3–13.5 µs per layer recovers **~0.565–0.675 ms per generated token** during decode (~6–8% total decode latency reduction).
+- **Upstream Path**: Ready for integration as a pure Triton routing module in TensorRT-LLM without requiring complex C++/CUDA template modifications. Check the [deep-dive report](file:///home/mkina/profiling/profiling-moe/docs/01_router_fusion.md) for full details.
