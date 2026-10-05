@@ -33,11 +33,12 @@ fuse_qk_norm_rope = False
 ```
 
 ### The 3 Bottlenecks:
-1. **Framework Assertion**: [tensorrt_llm/_torch/attention/qk_norm_attention.py](file:///home/mkina/profiling/TensorRT-LLM/tensorrt_llm/_torch/attention/qk_norm_attention.py#L184) enforces:
+1. **Framework Assertion (Overly Conservative)**: [tensorrt_llm/_torch/attention/qk_norm_attention.py](file:///home/mkina/profiling/TensorRT-LLM/tensorrt_llm/_torch/attention/qk_norm_attention.py#L184) enforces:
    ```python
    assert not (fuse_qk_norm_rope and skip_rope), "Fusing qk norm and skipping rope is not supported"
    ```
    Passing `fuse_qk_norm_rope = True` globally crashes on all 10 Full-Attention layers.
+   > **Framework Oversight**: This assertion is overly conservative. The framework could have intercepted `skip_rope=True` and clamped `position_ids` to zero (`position_ids = torch.zeros_like(...)`). Because $\cos(0) = 1$ and $\sin(0) = 0$, the RoPE rotation matrix reduces to the identity matrix ($R = I$), effectively converting the fused kernel into a pure per-head RMSNorm without requiring any C++ kernel modifications or raising a fatal assertion.
 2. **CUDA Kernel Monolith**: [fusedQKNormRopeKernel.cu](file:///home/mkina/profiling/TensorRT-LLM/cpp/tensorrt_llm/kernels/fusedQKNormRopeKernel.cu) hardcodes RoPE calculations directly into the register pipeline following RMSNorm without a `skip_rope` parameter. Setting `rotary_dim = 0` causes division by zero in frequency calculations.
 3. **Unfused Fallback Cost**: When `fuse_qk_norm_rope = False`, all 50 layers dispatch **3 disjoint CUDA kernels** (`q_norm` + `k_norm` + `apply_rope`) with intermediate DRAM roundtrips.
 
