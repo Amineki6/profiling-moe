@@ -40,11 +40,24 @@ When integrating Kolibri 1 into TensorRT-LLM, standard fused C++/CUDA kernels fa
 ## Project Structure
 
 ```text
-kolibri-moe-profiling/
+profiling-moe/
 ├── benchmarks/
-├── kernels/
-├── traces/                      # NVIDIA Nsight Systems (.nsys-rep) captures
-├── docs/                        # Deep dives into TRT-LLM kernel internals
-├── config.json                  # Kolibri 1 model architectural configuration
+│   ├── 01_benchmark_router.py
+│   └── results/                     # Auto-generated JSON benchmark results
+├── kernels/                         # Custom Triton/CUDA kernel implementations
+├── traces/                          # NVIDIA Nsight Systems (.nsys-rep) captures
+├── docs/                            # Deep-dive architectural analyses & IR proofs
+│   └── 01_router_fusion.md
+├── config.json                      # Kolibri 1 model architectural configuration
 ├── requirements.txt
 └── README.md
+```
+
+---
+
+## Investigation Progress & Results
+
+| # | Investigation | Target Layer | Eager Baseline | `torch.compile` | Custom Kernel | Status | Deep-Dive Doc |
+|:---:|:---|:---|:---:|:---:|:---:|:---:|:---|
+| **01** | **MoE Router Fusion** | Logit Bias + Top-6 ($E=384$) | $16.86\ \mu\text{s}$ | $16.38\ \mu\text{s}$ ($1.03\times$) | *In Progress* | 🔬 Investigating | [01_router_fusion.md](docs/01_router_fusion.md) |
+| **02** | **Hybrid Attention Norm** | SWA RoPE vs RNoPE | TBD | TBD | TBD | 📋 Planned | `docs/02_hybrid_attention.md` |

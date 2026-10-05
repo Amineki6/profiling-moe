@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime
 import torch
 import triton.testing
 from tabulate import tabulate
@@ -71,3 +72,31 @@ if __name__ == "__main__":
         headers=["Tokens (Batch)", "PyTorch Eager (µs)", "torch.compile (µs)", "Speedup"],
         tablefmt="github"
     ))
+
+    # Auto-save results to benchmarks/results/
+    results_dir = os.path.join(os.path.dirname(__file__), "results")
+    os.makedirs(results_dir, exist_ok=True)
+    json_path = os.path.join(results_dir, "01_router_results.json")
+
+    result_payload = {
+        "benchmark": "01_router_microbenchmark",
+        "timestamp": datetime.now().isoformat(),
+        "device": DEVICE_NAME,
+        "experts": NUM_EXPERTS,
+        "top_k": TOP_K,
+        "dtype": str(DTYPE),
+        "results": [
+            {
+                "batch_size": row[0],
+                "eager_us": float(row[1]),
+                "compiled_us": float(row[2]),
+                "speedup": row[3],
+            }
+            for row in table_data
+        ],
+    }
+
+    with open(json_path, "w") as f:
+        json.dump(result_payload, f, indent=2)
+
+    print(f"\n[Artifact Saved] Benchmark data saved to -> {json_path}")
