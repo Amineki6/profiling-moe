@@ -34,3 +34,17 @@ When integrating Kolibri 1 into TensorRT-LLM, standard fused C++/CUDA kernels fa
 - **Context**: Kolibri alternates every 5 layers: 4 Sliding-Window Attention (SWA) layers that apply rotary embeddings (RoPE), and 1 Full-Attention layer that skips RoPE completely (RNoPE).
 - **Challenge**: The current CUDA kernel (`fusedQKNormRopeKernel.cu`) enforces `assert not (fuse_qk_norm_rope and skip_rope)`, disallowing normalization without rotation.
 - **Investigation**: Can we either safely enable `fuse_qk_norm_rope = not self.is_full_attention` selectively on the 4 SWA layers, or add a pass-through bypass flag to `fusedQKNormRopeKernel.cu` so that all layers can benefit from single-pass SRAM fusion without crashing on RNoPE layers?
+
+---
+
+## Project Structure
+
+```text
+kolibri-moe-profiling/
+├── benchmarks/
+├── kernels/
+├── traces/                      # NVIDIA Nsight Systems (.nsys-rep) captures
+├── docs/                        # Deep dives into TRT-LLM kernel internals
+├── config.json                  # Kolibri 1 model architectural configuration
+├── requirements.txt
+└── README.md
