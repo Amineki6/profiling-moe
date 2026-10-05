@@ -11,8 +11,8 @@ This repository investigates whether writing custom monolithic C++/CUDA kernels 
 When integrating Kolibri 1 into TensorRT-LLM, standard fused C++/CUDA kernels fail due to mathematical and architectural differences:
 
 ### 1. MoE Routing ($E = 384$, $k = 6$)
-* **Logit-Space Bias:** Kolibri adds bias directly to raw logits ($\text{scores} = x + \text{bias}$) prior to $\text{TopK}$ selection. Existing TRT-LLM fused kernels (e.g., `MiniMax2`) apply bias in post-sigmoid space ($\sigma(x) + \text{bias}$), which yields mathematically divergent expert rankings.
-* **Unnormalized Sigmoids:** Kolibri assigns weights as $\text{topk\_weights} = \sigma(x[\text{topk\_ids}])$ where $\sum w_i \neq 1$. TRT-LLM's `SigmoidRenorm` kernel strictly enforces sum normalization ($\sum w_i = 1$).
+* **Logit-Space Bias:** Kolibri adds bias directly to raw logits (`scores = x + bias`) prior to Top-K selection. Existing TRT-LLM fused kernels (e.g., `MiniMax2`) apply bias in post-sigmoid space (`sigmoid(x) + bias`), which yields mathematically divergent expert rankings.
+* **Unnormalized Sigmoids:** Kolibri assigns weights as `topk_weights = sigmoid(x[topk_ids])` where weights do not sum to 1 ($\sum w_i \neq 1$). TRT-LLM's `SigmoidRenorm` kernel strictly enforces sum normalization ($\sum w_i = 1$).
 * **Expert Count Cap:** Built-in CUDA policy traits (`RoutingCustomPolicy.cuh`) specify a hard compilation limit of `Tier<128, 8>` ($E \le 128$). Kolibri uses 384 experts.
 
 ### 2. Attention Layer Structure
@@ -23,7 +23,7 @@ When integrating Kolibri 1 into TensorRT-LLM, standard fused C++/CUDA kernels fa
 
 ## Research Question
 
-> **Can we fuse Kolibri's MoE routing operations (logit bias + top-$k$ + unnormalized sigmoid) into a single CUDA/Triton kernel instead of relying on PyTorch's requires_separated_routing = True?**
+> **Can we fuse Kolibri's MoE routing operations (logit bias + top-k + unnormalized sigmoid) into a single CUDA/Triton kernel instead of relying on PyTorch's requires_separated_routing = True?**
 
 - **Context**: Kolibri 1 routes tokens across 384 experts by adding an `e_score_correction_bias` directly to raw logits, selecting top-k (k=6), and applying an unnormalized sigmoid activation ($\sum w_i \neq 1$).
 - **Challenge**: Existing trtllmGen routing kernels (`SigmoidRenorm` and `MiniMax2`) either force sum-to-1 normalization, do not support pre-activation logit biases, or are constrained to $\le 128$ experts.
@@ -59,5 +59,5 @@ profiling-moe/
 
 | # | Investigation | Target Layer | Eager Baseline | `torch.compile` | Custom Kernel | Status | Deep-Dive Doc |
 |:---:|:---|:---|:---:|:---:|:---:|:---:|:---|
-| **01** | **MoE Router Fusion** | Logit Bias + Top-6 ($E=384$) | $16.86\ \mu\text{s}$ | $16.38\ \mu\text{s}$ ($1.03\times$) | *In Progress* | 🔬 Investigating | [01_router_fusion.md](docs/01_router_fusion.md) |
+| **01** | **MoE Router Fusion** | Logit Bias + Top-6 ($E=384$) | 17.41 µs | 16.38 µs (1.06x) | *In Progress* | 🔬 Investigating | [01_router_fusion.md](docs/01_router_fusion.md) |
 | **02** | **Hybrid Attention Norm** | SWA RoPE vs RNoPE | TBD | TBD | TBD | 📋 Planned | `docs/02_hybrid_attention.md` |
