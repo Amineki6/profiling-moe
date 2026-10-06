@@ -107,10 +107,14 @@ Microbenchmarks were run across `[1, 4, 8, 16, 32, 64, 128]` batch sizes on a si
 - **Fused CUDA Kernel**: 4.24µs - 10.24µs.
 - **Speedup**: **~2.0x to 3.1x** speedup across all tested batch sizes.
 
+![Kolibri 1 SWA Attention Norm Benchmark](../assets/02_attention_norm_swa.png)
+
 ### Full-Attention Layers (10 Layers)
 - **Unfused Fallback**: 11.26µs - 16.38µs.
 - **Option 2 (Zero-Position Fused)**: 4.22µs - 10.24µs.
 - **Speedup**: **~1.6x to 2.2x** speedup over the PyTorch `RMSNorm` baseline. `torch.compile` was also tested but proved to be slower than the eager baseline (due to graph dispatch overheads on a single op).
+
+![Kolibri 1 Full Attention Norm Benchmark](../assets/02_attention_norm_full.png)
 
 ### Overall Decode Preprocessing (50-Layer Stack)
 For a single generation step:
@@ -119,5 +123,3 @@ For a single generation step:
 - **Overall Speedup**: **3.00x faster**.
 
 **Impact**: This optimization saves **~1.12 ms per token**.
-
-![Kolibri 1 Hybrid Attention Norm & RoPE](../assets/02_hybrid_attention_norm.png)

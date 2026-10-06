@@ -160,121 +160,139 @@ def plot_figure_1_router_benchmark():
     print(f"Generated: {output_path}")
 
 
-def plot_figure_2_attention_benchmark():
-    """Figure 2: Hybrid Attention Norm Dual-Panel Benchmark."""
+def plot_figure_2a_swa_benchmark():
+    """Figure 2A: Sliding Window Attention (SWA) 40-Layer Norm & RoPE Fusion."""
     attn_json_path = RESULTS_DIR / "02_attention_results.json"
     with open(attn_json_path, "r") as f:
         full_data = json.load(f)
 
     swa_data = full_data["swa_results"]
-    full_data_res = full_data["full_attention_results"]
-
     batch_sizes = [d["batch_size"] for d in swa_data]
     x = np.arange(len(batch_sizes))
     bar_width = 0.25
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.5, 5.0), dpi=300)
+    fig, ax = plt.subplots(figsize=(8.8, 4.6), dpi=300)
 
-    # ==================== Panel 1: SWA Layers ====================
     swa_unfused = [d["unfused_us"] for d in swa_data]
     swa_comp = [d["compiled_us"] for d in swa_data]
     swa_fused = [d["fused_cuda_us"] for d in swa_data]
     swa_speedups = [d["speedup"] for d in swa_data]
 
-    r1 = ax1.bar(
+    r1 = ax.bar(
         x - bar_width, swa_unfused, bar_width,
-        label="Unfused Baseline",
+        label="Unfused Baseline (PyTorch Eager)",
         color=COLOR_TAUPE_FILL, edgecolor=COLOR_TAUPE_EDGE, hatch="///", linewidth=0.9, zorder=3
     )
-    r2 = ax1.bar(
+    r2 = ax.bar(
         x, swa_comp, bar_width,
-        label="torch.compile",
+        label="torch.compile (Inductor)",
         color=COLOR_AMBER_FILL, edgecolor=COLOR_AMBER_EDGE, linewidth=0.9, zorder=3
     )
-    r3 = ax1.bar(
+    r3 = ax.bar(
         x + bar_width, swa_fused, bar_width,
-        label="Fused CUDA Kernel",
+        label="Fused CUDA Kernel (TRT-LLM)",
         color=COLOR_BERRY_FILL, edgecolor=COLOR_BERRY_EDGE, hatch="///", linewidth=0.9, zorder=3
     )
 
     for rect, spd in zip(r3, swa_speedups):
         height = rect.get_height()
-        ax1.annotate(
+        ax.annotate(
             spd,
             xy=(rect.get_x() + rect.get_width() / 2, height),
             xytext=(0, 4),
             textcoords="offset points",
             ha="center", va="bottom",
-            fontsize=8, fontweight="bold",
+            fontsize=8.5, fontweight="bold",
             color=COLOR_BERRY_EDGE
         )
 
-    ax1.spines["top"].set_visible(False)
-    ax1.spines["right"].set_visible(False)
-    ax1.grid(axis="y", zorder=0)
-    ax1.set_xticks(x)
-    ax1.set_xticklabels([f"b={b}" for b in batch_sizes], fontsize=9)
-    ax1.set_xlabel("Batch size (tokens)", fontsize=10, fontweight="semibold", labelpad=8)
-    ax1.set_ylabel("Kernel latency (µs) ↓", fontsize=10, fontweight="semibold", labelpad=8)
-    ax1.set_ylim(0, 26)
-    ax1.set_title("A. Sliding Window Attention (SWA) — 40 Layers (80%)\nRMSNorm + Rotary Embeddings (RoPE)",
-                  fontsize=10.5, fontweight="bold", color=TEXT_COLOR, pad=10, loc="left")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", zorder=0)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"b = {b}" for b in batch_sizes], fontsize=9.5)
+    ax.set_xlabel("Batch size (tokens)", fontsize=10.5, fontweight="semibold", labelpad=8)
+    ax.set_ylabel("Kernel latency (µs) ↓", fontsize=10.5, fontweight="semibold", labelpad=8)
+    ax.set_ylim(0, 26)
 
-    leg1 = ax1.legend(frameon=True, facecolor="#ffffff", edgecolor="#d1d5db", fontsize=8.5, loc="upper left")
-    leg1.get_frame().set_linewidth(0.8)
+    ax.set_title("Kolibri 1 Sliding Window Attention (SWA) Norm & RoPE Fusion\n"
+                 "40 Layers (80% of model) • RMSNorm + Rotary Embeddings • NVIDIA RTX 4090",
+                 fontsize=11, fontweight="bold", color=TEXT_COLOR, pad=12, loc="center")
 
-    # ==================== Panel 2: Full-Attention Layers ====================
+    leg = ax.legend(frameon=True, facecolor="#ffffff", edgecolor="#d1d5db", fontsize=9, loc="upper left")
+    leg.get_frame().set_linewidth(0.8)
+
+    plt.tight_layout()
+    output_path = ASSETS_DIR / "02_attention_norm_swa.png"
+    plt.savefig(output_path, dpi=300, facecolor=BG_COLOR)
+    plt.close()
+    print(f"Generated: {output_path}")
+
+
+def plot_figure_2b_full_attention_benchmark():
+    """Figure 2B: Full Attention (RNoPE) 10-Layer Norm Fusion via Zero-Position Workaround."""
+    attn_json_path = RESULTS_DIR / "02_attention_results.json"
+    with open(attn_json_path, "r") as f:
+        full_data = json.load(f)
+
+    full_data_res = full_data["full_attention_results"]
+    batch_sizes = [d["batch_size"] for d in full_data_res]
+    x = np.arange(len(batch_sizes))
+    bar_width = 0.25
+
+    fig, ax = plt.subplots(figsize=(8.8, 4.6), dpi=300)
+
     full_unfused = [d["unfused_us"] for d in full_data_res]
     full_comp = [d["compiled_us"] for d in full_data_res]
     full_workaround = [d["workaround_fused_us"] for d in full_data_res]
     full_speedups = [d["workaround_speedup"] for d in full_data_res]
 
-    r4 = ax2.bar(
+    r1 = ax.bar(
         x - bar_width, full_unfused, bar_width,
-        label="Unfused Baseline (RNoPE)",
+        label="Unfused Baseline (RNoPE RMSNorm)",
         color=COLOR_TAUPE_FILL, edgecolor=COLOR_TAUPE_EDGE, hatch="///", linewidth=0.9, zorder=3
     )
-    r5 = ax2.bar(
+    r2 = ax.bar(
         x, full_comp, bar_width,
-        label="torch.compile",
+        label="torch.compile (Inductor)",
         color=COLOR_AMBER_FILL, edgecolor=COLOR_AMBER_EDGE, linewidth=0.9, zorder=3
     )
-    r6 = ax2.bar(
+    r3 = ax.bar(
         x + bar_width, full_workaround, bar_width,
-        label="Option 2: Zero-Pos Fused",
+        label="Option 2: Zero-Pos Fused (TRT-LLM)",
         color=COLOR_TEAL_FILL, edgecolor=COLOR_TEAL_EDGE, hatch="///", linewidth=0.9, zorder=3
     )
 
-    for rect, spd in zip(r6, full_speedups):
+    for rect, spd in zip(r3, full_speedups):
         height = rect.get_height()
-        ax2.annotate(
+        ax.annotate(
             spd,
             xy=(rect.get_x() + rect.get_width() / 2, height),
             xytext=(0, 4),
             textcoords="offset points",
             ha="center", va="bottom",
-            fontsize=8, fontweight="bold",
+            fontsize=8.5, fontweight="bold",
             color=COLOR_TEAL_EDGE
         )
 
-    ax2.spines["top"].set_visible(False)
-    ax2.spines["right"].set_visible(False)
-    ax2.grid(axis="y", zorder=0)
-    ax2.set_xticks(x)
-    ax2.set_xticklabels([f"b={b}" for b in batch_sizes], fontsize=9)
-    ax2.set_xlabel("Batch size (tokens)", fontsize=10, fontweight="semibold", labelpad=8)
-    ax2.set_ylabel("Kernel latency (µs) ↓", fontsize=10, fontweight="semibold", labelpad=8)
-    ax2.set_ylim(0, 31)
-    ax2.set_title("B. Full Attention (RNoPE) — 10 Layers (20%)\nPure RMSNorm (pos = 0 Identity Bypass)",
-                  fontsize=10.5, fontweight="bold", color=TEXT_COLOR, pad=10, loc="left")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", zorder=0)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"b = {b}" for b in batch_sizes], fontsize=9.5)
+    ax.set_xlabel("Batch size (tokens)", fontsize=10.5, fontweight="semibold", labelpad=8)
+    ax.set_ylabel("Kernel latency (µs) ↓", fontsize=10.5, fontweight="semibold", labelpad=8)
+    ax.set_ylim(0, 31)
 
-    leg2 = ax2.legend(frameon=True, facecolor="#ffffff", edgecolor="#d1d5db", fontsize=8.5, loc="upper left")
-    leg2.get_frame().set_linewidth(0.8)
+    ax.set_title("Kolibri 1 Full Attention (RNoPE) Norm Fusion\n"
+                 "10 Layers (20% of model) • Pure RMSNorm via Zero-Position Identity Bypass • NVIDIA RTX 4090",
+                 fontsize=11, fontweight="bold", color=TEXT_COLOR, pad=12, loc="center")
 
-    fig.suptitle("Kolibri 1 Hybrid Attention Norm & RoPE Fusion Evaluation (RTX 4090)",
-                 fontsize=12.5, fontweight="bold", color=TEXT_COLOR, y=0.98)
+    leg = ax.legend(frameon=True, facecolor="#ffffff", edgecolor="#d1d5db", fontsize=9, loc="upper left")
+    leg.get_frame().set_linewidth(0.8)
+
     plt.tight_layout()
-    output_path = ASSETS_DIR / "02_hybrid_attention_norm.png"
+    output_path = ASSETS_DIR / "02_attention_norm_full.png"
     plt.savefig(output_path, dpi=300, facecolor=BG_COLOR)
     plt.close()
     print(f"Generated: {output_path}")
@@ -363,6 +381,7 @@ if __name__ == "__main__":
     print("Generating Academic White Palette Visualizations for Kolibri 1 Profiling Repo")
     print("=" * 80)
     plot_figure_1_router_benchmark()
-    plot_figure_2_attention_benchmark()
+    plot_figure_2a_swa_benchmark()
+    plot_figure_2b_full_attention_benchmark()
     plot_figure_3_decode_impact()
-    print("\nAll 3 figures generated successfully in assets/ directory!")
+    print("\nAll 4 figures generated successfully in assets/ directory!")
