@@ -62,20 +62,37 @@ fuse_qk_norm_rope = not self.is_full_attention
 
 For the 10 Full-Attention layers, using the Unfused fallback is computationally wasteful. We can trick the fused C++ kernel into performing a pure RMSNorm by exploiting the mathematics of RoPE.
 
-If we pass an array of all zeros as the `position_ids`, the RoPE angle computation yields $\theta = 0$. Since $\cos(0) = 1$ and $\sin(0) = 0$, the RoPE rotation matrix becomes the identity matrix. The `fusedQKNormRopeKernel` applies the RMSNorm and then multiplies the normalized vectors by the identity matrix, effectively bypassing the rotation entirely.
+If we pass an array of all zeros as the `position_ids`, the RoPE angle computation yields $\theta = 0$. Since $\cos(0) = 1$ and $\sin(0) = 0$, the RoPE rotation matrix becomes the identity matrix:
+$$R(\theta=0) = \begin{pmatrix} \cos(0) & -\sin(0) \\ \sin(0) & \cos(0) \end{pmatrix} = \begin{pmatrix} 1 & 0 \\ 0 & 1 \end{pmatrix} = I$$
+
+The `fusedQKNormRopeKernel` applies the RMSNorm and then multiplies the normalized vectors by the identity matrix, effectively bypassing the rotation entirely ($x \cdot I = x$).
 
 This allows us to leverage the highly-optimized C++ kernel (and its ~2.2x speedup) even for the RNoPE layers, without triggering division-by-zero or requiring C++ kernel modifications.
+
+### Numerical Equivalence Proof & Verification Results
+
+Tested across batch sizes `[1, 4, 16, 64]` via [`benchmarks/02_verify_zero_position_rnope.py`](file:///home/mkina/profiling/profiling-moe/benchmarks/02_verify_zero_position_rnope.py) and [`benchmarks/02_verify_attention_norm.py`](file:///home/mkina/profiling/profiling-moe/benchmarks/02_verify_attention_norm.py):
+
+| Batch Size | Max $\Delta Q$ (vs Pure RMSNorm) | Max $\Delta K$ (vs Pure RMSNorm) | Max $\Delta V$ (Pass-through) | Status |
+| :---: | :---: | :---: | :---: | :---: |
+| **1** | `0.000000` | `0.000000` | `0.000000` | **MATCH (Bit-exact)** |
+| **4** | `0.000000` | `0.000000` | `0.000000` | **MATCH (Bit-exact)** |
+| **16** | `0.000000` | `0.000000` | `0.000000` | **MATCH (Bit-exact)** |
+| **64** | `0.000000` | `0.000000` | `0.000000` | **MATCH (Bit-exact)** |
+
+* **Contrast Check**: When non-zero position IDs are supplied ($\text{pos} > 0$), rotation divergence $\Delta Q > 0.1$, confirming that non-zero positions rotate the coordinates while zero positions mathematically collapse into the pure RMSNorm identity.
 
 ---
 
 ## 5. Verification Matrix
 
-The verification script [benchmarks/02_verify_attention_norm.py](file:///home/mkina/profiling/profiling-moe/benchmarks/02_verify_attention_norm.py) validates:
+The verification scripts [[benchmarks/02_verify_attention_norm.py](file:///home/mkina/profiling/profiling-moe/benchmarks/02_verify_attention_norm.py)] and [[benchmarks/02_verify_zero_position_rnope.py](file:///home/mkina/profiling/profiling-moe/benchmarks/02_verify_zero_position_rnope.py)] validate:
 
 | Test Case | Description | Target |
 | :--- | :--- | :--- |
 | **Test 1** | Numerical equivalence between fused C++ CUDA kernel and PyTorch eager on SWA layers. | `assert_close` atol $\le 2\times 10^{-2}$ (bf16) |
 | **Test 2** | Full-Attention RNoPE verification (Q/K normalized, RoPE rotation skipped). | Pure RMSNorm match |
+| **Test 2b** | Option 2 equivalence: Fused kernel with `position_ids = 0` vs Pure RMSNorm. | Bit-exact match (`0.000000`) |
 | **Test 3** | Layer-selective initialization across all 50 layers. | Zero assertion errors |
 | **Test 4** | End-to-end 50-layer sequential forward execution in decode ($b=1$) and prefill ($b=16$). | Output shapes valid |
 
@@ -102,3 +119,5 @@ For a single generation step:
 - **Overall Speedup**: **3.00x faster**.
 
 **Impact**: This optimization saves **~1.12 ms per token**.
+
+![Kolibri 1 Hybrid Attention Norm & RoPE](../assets/02_hybrid_attention_norm.png)

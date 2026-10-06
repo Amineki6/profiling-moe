@@ -52,6 +52,8 @@ Microbenchmark conducted on **NVIDIA GeForce RTX 4090** (using `triton.testing.d
 | **64** | 18.34 | 19.46 | 0.94x | **6.03** | **3.04x** | Prefill |
 | **128** | 19.46 | 21.50 | 0.90x | **6.03** | **3.23x** | Prefill |
 
+![Kolibri 1 MoE Router Microbenchmark](../assets/01_router_microbenchmark.png)
+
 ---
 
 ## 4. Under-the-Hood Proof (Compiler IR Inspection)

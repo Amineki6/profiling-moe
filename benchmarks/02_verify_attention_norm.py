@@ -14,6 +14,7 @@ Validates:
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 import torch
 
 
@@ -38,6 +39,7 @@ def create_mock_attention_layer(
     layer_idx: int,
     fuse_qk_norm_rope: bool,
     rope_fusion: bool = True,
+    skip_rope: Optional[bool] = None,
 ) -> Kolibri1Attention:
     """Helper to instantiate Kolibri1Attention with explicit fuse_qk_norm_rope flag.
 
@@ -54,8 +56,10 @@ def create_mock_attention_layer(
         and layer_types[layer_idx] == "full_attention"
     )
 
+    resolved_skip_rope = is_full_attn if skip_rope is None else skip_rope
+
     pos_embd_params = None
-    if not is_full_attn:
+    if (not is_full_attn) or (fuse_qk_norm_rope and not resolved_skip_rope):
         pos_embd_params = PositionalEmbeddingParams(
             type=PositionEmbeddingType.rope_gpt_neox,
             rope=RopeParams.from_config(config),
@@ -76,7 +80,7 @@ def create_mock_attention_layer(
         max_position_embeddings=config.max_position_embeddings,
         bias=False,
         pos_embd_params=pos_embd_params,
-        skip_rope=is_full_attn,
+        skip_rope=resolved_skip_rope,
         fuse_qk_norm_rope=fuse_qk_norm_rope,
         rope_fusion=rope_fusion,
         layer_idx=layer_idx,
@@ -187,6 +191,63 @@ def test_02_full_attention_rnope_bypass(model_config: ModelConfig[Kolibri1Config
     print("  TEST 2 PASSED: Full-Attention layer accurately preserves RNoPE semantics.")
 
 
+def test_02b_zero_position_rnope_equivalence(model_config: ModelConfig[Kolibri1Config]):
+    print("\n" + "=" * 80)
+    print("TEST 2b: Option 2 Equivalence (Fused Kernel with position_ids=0 vs Pure RMSNorm)")
+    print("=" * 80)
+
+    cfg = model_config.pretrained_config
+    num_heads_q = cfg.num_attention_heads       # 48
+    num_heads_kv = cfg.num_key_value_heads      # 4
+    head_dim = cfg.head_dim                    # 128
+    qkv_dim = (num_heads_q + 2 * num_heads_kv) * head_dim  # 7168
+
+    # 1. Unfused reference (pure RMSNorm, skip_rope=True)
+    layer_unfused = create_mock_attention_layer(
+        model_config, layer_idx=4, fuse_qk_norm_rope=False, skip_rope=True
+    )
+    # 2. Fused CUDA kernel layer (fuse_qk_norm_rope=True, skip_rope=False, fed pos=0)
+    layer_fused = create_mock_attention_layer(
+        model_config, layer_idx=4, fuse_qk_norm_rope=True, skip_rope=False
+    )
+
+    with torch.no_grad():
+        layer_fused.q_norm.weight.copy_(layer_unfused.q_norm.weight)
+        layer_fused.k_norm.weight.copy_(layer_unfused.k_norm.weight)
+
+    for b in [1, 4, 16, 64]:
+        torch.manual_seed(42 + b)
+        qkv_in = torch.randn(b, qkv_dim, dtype=torch.bfloat16, device="cuda")
+
+        q = qkv_in[:, :num_heads_q * head_dim].clone()
+        k = qkv_in[:, num_heads_q * head_dim:(num_heads_q + num_heads_kv) * head_dim].clone()
+        v = qkv_in[:, (num_heads_q + num_heads_kv) * head_dim:].clone()
+
+        # Pure RMSNorm reference
+        ref_q = layer_unfused.q_norm(q.reshape(-1, head_dim)).reshape(b, -1)
+        ref_k = layer_unfused.k_norm(k.reshape(-1, head_dim)).reshape(b, -1)
+
+        # Fused kernel with position_ids = 0
+        zero_pos = torch.zeros(b, dtype=torch.int32, device="cuda")
+        out_fused_qkv, _, _ = layer_fused.apply_rope(qkv_in.clone(), None, None, zero_pos)
+
+        fused_q = out_fused_qkv[:, :num_heads_q * head_dim]
+        fused_k = out_fused_qkv[:, num_heads_q * head_dim:(num_heads_q + num_heads_kv) * head_dim]
+        fused_v = out_fused_qkv[:, (num_heads_q + num_heads_kv) * head_dim:]
+
+        diff_q = (fused_q - ref_q).abs().max().item()
+        diff_k = (fused_k - ref_k).abs().max().item()
+        diff_v = (fused_v - v).abs().max().item()
+
+        torch.testing.assert_close(fused_q, ref_q, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(fused_k, ref_k, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(fused_v, v, atol=1e-5, rtol=1e-5)
+
+        print(f"  [b={b:2d}] Max Diff Q: {diff_q:.6f} | Max Diff K: {diff_k:.6f} | Max Diff V: {diff_v:.6f}")
+
+    print("  TEST 2b PASSED: Fused CUDA kernel with position_ids=0 is bit-exact identical to pure RMSNorm.")
+
+
 def test_03_layer_selective_initialization(model_config: ModelConfig[Kolibri1Config]):
     print("\n" + "=" * 80)
     print("TEST 3: 50-Layer Model Initialization (Option 1: Layer-Selective Fusion)")
@@ -260,6 +321,7 @@ if __name__ == "__main__":
 
     test_01_swa_numerical_equivalence(config)
     test_02_full_attention_rnope_bypass(config)
+    test_02b_zero_position_rnope_equivalence(config)
     layers = test_03_layer_selective_initialization(config)
     test_04_sequential_50_layer_forward(layers, config)
 

@@ -41,10 +41,16 @@ When integrating Kolibri 1 into TensorRT-LLM, standard fused C++/CUDA kernels fa
 
 ```text
 profiling-moe/
+├── assets/                          # Publication-grade benchmark figures
+│   ├── 01_router_microbenchmark.png
+│   ├── 02_hybrid_attention_norm.png
+│   └── 03_end_to_end_decode_impact.png
 ├── benchmarks/
 │   ├── 01_benchmark_router.py
 │   ├── 02_benchmark_attention_norm.py
 │   ├── 02_verify_attention_norm.py
+│   ├── 02_verify_zero_position_rnope.py
+│   ├── generate_figures.py          # Reproducible figure rendering pipeline
 │   └── results/                     # Auto-generated JSON benchmark results
 │       ├── 01_router_results.json
 │       └── 02_attention_results.json
@@ -65,8 +71,10 @@ profiling-moe/
 
 | # | Investigation | Target Layer | Eager Baseline | `torch.compile` | Custom / Fused Kernel | Deep-Dive Doc |
 |:---:|:---|:---|:---:|:---:|:---:|:---|
-| **01** | **MoE Router Fusion** | Logit Bias + Top-6 ($E=384$) | 17.41 µs | 16.38 µs (1.06x) | **5.12 µs (3.40x)** (Triton) | [01_router_fusion.md](file:///home/mkina/profiling/profiling-moe/docs/01_router_fusion.md) |
-| **02** | **Hybrid Attention Norm** | SWA RoPE + RNoPE (50 layers) | 1.68 ms | N/A (regressed) | **0.56 ms (3.00x)** (Fused C++) | [02_hybrid_attention.md](file:///home/mkina/profiling/profiling-moe/docs/02_hybrid_attention.md) |
+| **01** | **MoE Router Fusion** | Logit Bias + Top-6 ($E=384$) | 17.41 µs | 16.38 µs (1.06x) | **5.12 µs (3.40x)** (New Triton Kernel) | [01_router_fusion.md](file:///home/mkina/profiling/profiling-moe/docs/01_router_fusion.md) |
+| **02** | **Hybrid Attention Norm** | SWA RoPE + RNoPE (50 layers) | 1.68 ms | N/A (regressed) | **0.56 ms (3.00x)** (Existing CUDA Kernel) | [02_hybrid_attention.md](file:///home/mkina/profiling/profiling-moe/docs/02_hybrid_attention.md) |
+
+![Kolibri 1 Decode Latency Impact](assets/03_end_to_end_decode_impact.png)
 
 ---
 
@@ -81,15 +89,19 @@ profiling-moe/
 - **End-to-End Impact**: In Kolibri 1 (50 MoE layers), saving ~11.3–13.5 µs per layer recovers **~0.565–0.675 ms per generated token** during decode (~6–8% total decode latency reduction).
 - **Upstream Path**: Ready for integration as a pure Triton routing module in TensorRT-LLM without requiring complex C++/CUDA template modifications. Check the [deep-dive report](file:///home/mkina/profiling/profiling-moe/docs/01_router_fusion.md) for full details.
 
+![Kolibri 1 MoE Router Microbenchmark](assets/01_router_microbenchmark.png)
+
 ### Investigation 02: Hybrid Attention Norm & RoPE Fusion
 - **Problem**: Kolibri 1 interleaves 40 Sliding Window Attention (SWA with RoPE) layers and 10 Full-Attention (RNoPE without rotary embeddings) layers. TensorRT-LLM globally disables single-pass QK-Norm + RoPE fusion (`fuse_qk_norm_rope = False`) because `qk_norm_attention.py` hardcodes `assert not (fuse_qk_norm_rope and skip_rope)`. This forces all 50 layers into an unfused fallback path dispatching 3 separate CUDA kernels (`q_norm` + `k_norm` + `apply_rope`) per layer with high launch overhead and DRAM bandwidth penalties.
 - **Root Cause & Framework Oversight**: The TRT-LLM framework assertion is overly conservative. When `skip_rope=True`, the framework could simply clamp `position_ids` to zero (`position_ids = torch.zeros_like(...)`). Because $\cos(0) = 1$ and $\sin(0) = 0$, the RoPE rotation matrix becomes the exact identity matrix ($R = I$). The C++ kernel ([fusedQKNormRopeKernel.cu](file:///home/mkina/profiling/TensorRT-LLM/cpp/tensorrt_llm/kernels/fusedQKNormRopeKernel.cu)) executes pure per-head RMSNorm at full fused speed without requiring any C++ kernel modifications or raising assertions.
 - **Solutions Validated**:
   - **Option 1 (Layer-Selective Fusion)**: Configure `fuse_qk_norm_rope = not self.is_full_attention` in `modeling_kolibri.py`. 40 SWA layers run fused, while 10 Full-Attention layers take the clean fallback path.
-  - **Option 2 (Zero-Position Workaround)**: Pass `position_ids = 0` to Full-Attention layers, unlocking the fused C++ kernel for all 50 layers.
+  - **Option 2 (Zero-Position Workaround)**: Pass `position_ids = 0` to Full-Attention layers, unlocking the fused C++ kernel for all 50 layers with bit-exact numerical parity.
 - **Microbenchmark Results (RTX 4090)**:
   - **SWA Layers (40 layers)**: Fused CUDA kernel runs in **4.24–5.12 µs** vs **13.09–20.48 µs** unfused (**2.0x–3.1x speedup**).
   - **Full-Attention Layers (10 layers)**: Zero-position fused kernel runs in **4.22–5.12 µs** vs **11.26–16.38 µs** unfused (**1.6x–2.2x speedup**).
   - **50-Layer Stack (Decode Token Latency)**: Total attention norm time dropped from **1.678 ms** to **0.559 ms** (**3.00x end-to-end speedup**).
 - **End-to-End Impact**: Saves **~1.12 ms per generated token** during decoding across the 50-layer model.
 - **Upstream Path**: Either adopt layer-selective fusion in `modeling_kolibri.py` or upstream the zero-position identity bypass directly into `qk_norm_attention.py`. Check the [deep-dive report](file:///home/mkina/profiling/profiling-moe/docs/02_hybrid_attention.md) for full details.
+
+![Kolibri 1 Hybrid Attention Norm & RoPE](assets/02_hybrid_attention_norm.png)
