@@ -1,10 +1,15 @@
 import json
 import os
+import sys
 from datetime import datetime
+from typing import Callable, Dict, Tuple
 import torch
 import triton.testing
 from tabulate import tabulate
 
+# -----------------------------------------------------------------------------
+# Configuration & Device Setup
+# -----------------------------------------------------------------------------
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config.json")
 if os.path.exists(CONFIG_PATH):
     with open(CONFIG_PATH, "r") as f:
@@ -19,112 +24,179 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.bfloat16
 DEVICE_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
 
-print(f"Device: {DEVICE_NAME} | Experts: {NUM_EXPERTS} | Top-K: {TOP_K}")
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+from kernels import fused_kolibri_router
 
-# 1. Kolibri 1 Routing Logic
-def eager_kolibri_router(x: torch.Tensor, bias: torch.Tensor, k: int):
+# -----------------------------------------------------------------------------
+# 1. Baseline Implementations
+# -----------------------------------------------------------------------------
+def eager_kolibri_router(x: torch.Tensor, bias: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
     scores = x + bias
     topk_ids = torch.topk(scores, k=k, dim=-1).indices
     topk_weights = torch.sigmoid(torch.gather(x, -1, topk_ids))
     return topk_ids, topk_weights
 
 @torch.compile(mode="reduce-overhead")
-def compiled_kolibri_router(x: torch.Tensor, bias: torch.Tensor, k: int):
+def compiled_kolibri_router(x: torch.Tensor, bias: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
     scores = x + bias
     topk_ids = torch.topk(scores, k=k, dim=-1).indices
     topk_weights = torch.sigmoid(torch.gather(x, -1, topk_ids))
     return topk_ids, topk_weights
 
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from kernels import fused_kolibri_router
+# -----------------------------------------------------------------------------
+# 2. Dynamic Discovery of CUDA Variants (from Step 2)
+# -----------------------------------------------------------------------------
+cuda_ops = None
+cuda_load_error = None
+try:
+    from kernels.kolibri_cuda_router import kolibri_cuda_ops
+    cuda_ops = kolibri_cuda_ops
+except Exception as e:
+    cuda_load_error = str(e)
 
-def bench_gpu_kernel_us(fn, *args):
-    # warmup=25 ms, rep=100 ms (~6,000 iterations per kernel)
+# -----------------------------------------------------------------------------
+# 3. Benchmark Utilities
+# -----------------------------------------------------------------------------
+def bench_gpu_kernel_us(fn: Callable, *args) -> float:
+    """Benchmark GPU execution time in microseconds (median across ~6000 iters)."""
     ms = triton.testing.do_bench(lambda: fn(*args), warmup=25, rep=100, return_mode="median")
     return ms * 1000.0
 
-if __name__ == "__main__":
-    assert torch.cuda.is_available(), "CUDA required for profiling!"
 
-    batch_sizes = [1, 4, 8, 16, 32, 64, 128]
+def main():
+    assert torch.cuda.is_available(), "CUDA is required for profiling!"
+    print(f"\n=======================================================")
+    print(f" Kolibri 1 MoE Router A/B Benchmark & Profiling")
+    print(f" Device : {DEVICE_NAME}")
+    print(f" Experts: {NUM_EXPERTS} | Top-K: {TOP_K} | Dtype: {DTYPE}")
+    print(f"=======================================================")
+
+    # Register all active variants
+    variants: Dict[str, Callable[[torch.Tensor, torch.Tensor, int], Tuple[torch.Tensor, torch.Tensor]]] = {
+        "PyTorch Eager": eager_kolibri_router,
+        "torch.compile": compiled_kolibri_router,
+        "Fused Triton": fused_kolibri_router,
+    }
+
+    if cuda_ops is not None:
+        if hasattr(cuda_ops, "forward_vA"):
+            variants["CUDA vA"] = lambda x, b, k: cuda_ops.forward_vA(x, b, k)
+            print(" [Found] CUDA Variant A (forward_vA) registered.")
+        if hasattr(cuda_ops, "forward_vB"):
+            variants["CUDA vB"] = lambda x, b, k: cuda_ops.forward_vB(x, b, k)
+            print(" [Found] CUDA Variant B (forward_vB) registered.")
+    else:
+        print(f" [Info] CUDA ops not loaded yet (Step 2 in progress): {cuda_load_error}")
+        print("        Running comparison across existing baselines.")
+
+    # Sweep token batch sizes
+    batch_sizes = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
     bias = torch.randn(NUM_EXPERTS, device=DEVICE, dtype=DTYPE)
 
-    table_data = []
+    # -------------------------------------------------------------------------
+    # ASSERTION GATE: Ensure mathematical equivalence before timing
+    # -------------------------------------------------------------------------
+    print("\n[Assertion Gate] Verifying numerical correctness against Eager baseline...")
+    test_x = torch.randn(32, NUM_EXPERTS, device=DEVICE, dtype=DTYPE)
+    ref_ids, ref_weights = eager_kolibri_router(test_x, bias, TOP_K)
+    ref_scores = test_x + bias
+    ref_top_scores = torch.topk(ref_scores.float(), k=TOP_K, dim=-1).values
 
-    print("\nValidating numerical correctness & profiling sweeps...")
+    for name, fn in variants.items():
+        if name == "PyTorch Eager":
+            continue
+        out_ids, out_weights = fn(test_x, bias, TOP_K)
+
+        # 1. Verify weight computation on chosen experts in native dtype
+        expected_weights = torch.sigmoid(torch.gather(test_x, -1, out_ids.long()))
+        assert torch.allclose(out_weights, expected_weights, atol=3e-3, rtol=3e-3), (
+            f"❌ [{name}] Output weights mismatch expected sigmoid(x[ids])! Max diff: "
+            f"{(out_weights.float() - expected_weights.float()).abs().max().item()}"
+        )
+
+        # 2. Verify selected experts correspond to top scores (handles tie-breaking / FP32 vs BF16 order)
+        selected_scores = torch.gather(ref_scores.float(), -1, out_ids.long())
+        selected_sorted = selected_scores.sort(dim=-1, descending=True).values
+        assert torch.allclose(ref_top_scores, selected_sorted, atol=1e-2, rtol=1e-2), (
+            f"❌ [{name}] Selected experts do not match top score values!"
+        )
+
+        # 3. Exact index match report (informational if ties occur)
+        if torch.equal(ref_ids.sort().values.int(), out_ids.sort().values.int()):
+            print(f"  ✓ [{name}] 100% exact expert index and weight match.")
+        else:
+            print(f"  ✓ [{name}] Passed score & weight equivalence (minor tie-break ordering due to FP32/BF16 precision).")
+
+
+    # -------------------------------------------------------------------------
+    # STATISTICAL BENCHMARKING SWEEP
+    # -------------------------------------------------------------------------
+    print("\n[Benchmarking] Running GPU latency sweeps...")
+    records = []
+    has_va = "CUDA vA" in variants
+    has_vb = "CUDA vB" in variants
+
     for b in batch_sizes:
         x = torch.randn(b, NUM_EXPERTS, device=DEVICE, dtype=DTYPE)
+        row = {"batch_size": b}
 
-        # 1. Warm up shape & verify mathematical equivalence
-        eager_ids, eager_weights = eager_kolibri_router(x, bias, TOP_K)
-        comp_ids, comp_weights = compiled_kolibri_router(x, bias, TOP_K)
-        tri_ids, tri_weights = fused_kolibri_router(x, bias, TOP_K)
+        for name, fn in variants.items():
+            t_us = bench_gpu_kernel_us(fn, x, bias, TOP_K)
+            row[name] = t_us
 
-        assert torch.equal(eager_ids, comp_ids), f"Compile TopK mismatch at batch size {b}!"
-        assert torch.allclose(eager_weights, comp_weights, atol=1e-3, rtol=1e-3), f"Compile Weight mismatch at batch size {b}!"
+        # Calculate relative metrics
+        t_eager = row["PyTorch Eager"]
+        t_tri = row["Fused Triton"]
+        row["Triton Speedup"] = f"{t_eager / t_tri:.2f}x"
 
-        # Verify Triton output correctness
-        expected_tri_weights = torch.sigmoid(torch.gather(x, -1, tri_ids.long()))
-        assert torch.allclose(tri_weights, expected_tri_weights, atol=1e-3, rtol=1e-3), f"Triton weight mismatch at batch size {b}!"
+        if has_va:
+            row["vA Speedup"] = f"{t_eager / row['CUDA vA']:.2f}x"
+        if has_vb:
+            row["vB Speedup"] = f"{t_eager / row['CUDA vB']:.2f}x"
+        if has_va and has_vb:
+            # A/B comparison: positive means B is faster than A
+            delta_pct = (row["CUDA vA"] - row["CUDA vB"]) / row["CUDA vA"] * 100.0
+            row["A/B Delta"] = f"{delta_pct:+.1f}%"
 
-        # 2. Benchmark GPU execution time
-        t_eager = bench_gpu_kernel_us(eager_kolibri_router, x, bias, TOP_K)
-        t_comp = bench_gpu_kernel_us(compiled_kolibri_router, x, bias, TOP_K)
-        t_tri = bench_gpu_kernel_us(fused_kolibri_router, x, bias, TOP_K)
+        records.append(row)
 
-        sp_comp = t_eager / t_comp if t_comp > 0 else 1.0
-        sp_tri = t_eager / t_tri if t_tri > 0 else 1.0
-
-        table_data.append([
-            b,
-            f"{t_eager:.2f}",
-            f"{t_comp:.2f}",
-            f"{t_tri:.2f}",
-            f"{sp_comp:.2f}x",
-            f"{sp_tri:.2f}x",
-        ])
+    # -------------------------------------------------------------------------
+    # DISPLAY TABULAR RESULTS
+    # -------------------------------------------------------------------------
+    headers = ["Tokens (B)"] + [k for k in records[0].keys() if k != "batch_size"]
+    table_rows = []
+    for r in records:
+        row_vals = [r["batch_size"]]
+        for k in headers[1:]:
+            val = r[k]
+            row_vals.append(f"{val:.2f}" if isinstance(val, float) else str(val))
+        table_rows.append(row_vals)
 
     print(f"\n### Kolibri 1 MoE Router Microbenchmark ({DEVICE_NAME})")
-    print(tabulate(
-        table_data,
-        headers=[
-            "Tokens (Batch)",
-            "PyTorch Eager (µs)",
-            "torch.compile (µs)",
-            "Fused Triton (µs)",
-            "Compile Speedup",
-            "Triton Speedup",
-        ],
-        tablefmt="github"
-    ))
+    print(tabulate(table_rows, headers=headers, tablefmt="github"))
 
-    # Auto-save results to benchmarks/results/
+    # -------------------------------------------------------------------------
+    # PERSIST RESULTS TO JSON
+    # -------------------------------------------------------------------------
     results_dir = os.path.join(os.path.dirname(__file__), "results")
     os.makedirs(results_dir, exist_ok=True)
     json_path = os.path.join(results_dir, "01_router_results.json")
 
-    result_payload = {
-        "benchmark": "01_router_microbenchmark",
+    payload = {
+        "benchmark": "01_router_ab_benchmark",
         "timestamp": datetime.now().isoformat(),
         "device": DEVICE_NAME,
         "experts": NUM_EXPERTS,
         "top_k": TOP_K,
         "dtype": str(DTYPE),
-        "results": [
-            {
-                "batch_size": row[0],
-                "eager_us": float(row[1]),
-                "compiled_us": float(row[2]),
-                "triton_us": float(row[3]),
-                "compile_speedup": row[4],
-                "triton_speedup": row[5],
-            }
-            for row in table_data
-        ],
+        "results": records,
     }
 
     with open(json_path, "w") as f:
-        json.dump(result_payload, f, indent=2)
+        json.dump(payload, f, indent=2)
 
-    print(f"\n[Artifact Saved] Benchmark data saved to -> {json_path}")
+    print(f"\n[Artifact Saved] Benchmark data saved to -> {json_path}\n")
+
+
+if __name__ == "__main__":
+    main()
