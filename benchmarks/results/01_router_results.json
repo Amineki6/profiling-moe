@@ -1,87 +1,109 @@
 {
   "benchmark": "01_router_ab_benchmark",
-  "timestamp": "2026-10-16T17:17:54.941151",
+  "timestamp": "2026-10-17T00:10:50.770308",
   "device": "NVIDIA GeForce RTX 4090",
   "experts": 384,
   "top_k": 6,
-  "dtype": "torch.bfloat16",
+  "dtype": "torch.float32",
   "results": [
     {
       "batch_size": 1,
-      "PyTorch Eager": 17.40800030529499,
-      "torch.compile": 16.383999958634377,
-      "Fused Triton": 6.144000217318535,
-      "Triton Speedup": "2.83x"
+      "PyTorch Eager": 16.383999958634377,
+      "Fused Triton": 5.183999892324209,
+      "Custom Kolibri CUDA": 5.119999870657921,
+      "Triton Speedup": "3.16x",
+      "CUDA Speedup": "3.20x",
+      "CUDA vs Triton": "+1.2%"
     },
     {
       "batch_size": 4,
-      "PyTorch Eager": 18.432000651955605,
-      "torch.compile": 16.383999958634377,
+      "PyTorch Eager": 17.40800030529499,
       "Fused Triton": 6.144000217318535,
-      "Triton Speedup": "3.00x"
+      "Custom Kolibri CUDA": 5.119999870657921,
+      "Triton Speedup": "2.83x",
+      "CUDA Speedup": "3.40x",
+      "CUDA vs Triton": "+16.7%"
     },
     {
       "batch_size": 8,
-      "PyTorch Eager": 18.432000651955605,
-      "torch.compile": 16.383999958634377,
-      "Fused Triton": 5.216000135987997,
-      "Triton Speedup": "3.53x"
+      "PyTorch Eager": 17.40800030529499,
+      "Fused Triton": 6.144000217318535,
+      "Custom Kolibri CUDA": 6.144000217318535,
+      "Triton Speedup": "2.83x",
+      "CUDA Speedup": "2.83x",
+      "CUDA vs Triton": "+0.0%"
     },
     {
       "batch_size": 16,
-      "PyTorch Eager": 17.664000391960144,
-      "torch.compile": 17.11999997496605,
-      "Fused Triton": 6.144000217318535,
-      "Triton Speedup": "2.87x"
+      "PyTorch Eager": 17.40800030529499,
+      "Fused Triton": 5.152000114321709,
+      "Custom Kolibri CUDA": 6.0800001956522465,
+      "Triton Speedup": "3.38x",
+      "CUDA Speedup": "2.86x",
+      "CUDA vs Triton": "-18.0%"
     },
     {
       "batch_size": 32,
-      "PyTorch Eager": 18.20800080895424,
-      "torch.compile": 17.40800030529499,
-      "Fused Triton": 6.0800001956522465,
-      "Triton Speedup": "2.99x"
+      "PyTorch Eager": 18.432000651955605,
+      "Fused Triton": 6.144000217318535,
+      "Custom Kolibri CUDA": 6.144000217318535,
+      "Triton Speedup": "3.00x",
+      "CUDA Speedup": "3.00x",
+      "CUDA vs Triton": "+0.0%"
     },
     {
       "batch_size": 64,
       "PyTorch Eager": 18.432000651955605,
-      "torch.compile": 18.432000651955605,
-      "Fused Triton": 5.183999892324209,
-      "Triton Speedup": "3.56x"
+      "Fused Triton": 6.144000217318535,
+      "Custom Kolibri CUDA": 6.144000217318535,
+      "Triton Speedup": "3.00x",
+      "CUDA Speedup": "3.00x",
+      "CUDA vs Triton": "+0.0%"
     },
     {
       "batch_size": 128,
-      "PyTorch Eager": 19.519999623298645,
-      "torch.compile": 22.23999984562397,
+      "PyTorch Eager": 19.74399946630001,
       "Fused Triton": 6.144000217318535,
-      "Triton Speedup": "3.18x"
+      "Custom Kolibri CUDA": 6.144000217318535,
+      "Triton Speedup": "3.21x",
+      "CUDA Speedup": "3.21x",
+      "CUDA vs Triton": "+0.0%"
     },
     {
       "batch_size": 256,
-      "PyTorch Eager": 21.503999829292297,
-      "torch.compile": 25.407999753952026,
-      "Fused Triton": 6.144000217318535,
-      "Triton Speedup": "3.50x"
+      "PyTorch Eager": 22.52800017595291,
+      "Fused Triton": 7.104000076651573,
+      "Custom Kolibri CUDA": 7.023999933153391,
+      "Triton Speedup": "3.17x",
+      "CUDA Speedup": "3.21x",
+      "CUDA vs Triton": "+1.1%"
     },
     {
       "batch_size": 512,
-      "PyTorch Eager": 26.623999699950218,
-      "torch.compile": 30.719999223947525,
-      "Fused Triton": 6.144000217318535,
-      "Triton Speedup": "4.33x"
+      "PyTorch Eager": 28.672000393271446,
+      "Fused Triton": 7.168000098317862,
+      "Custom Kolibri CUDA": 7.168000098317862,
+      "Triton Speedup": "4.00x",
+      "CUDA Speedup": "4.00x",
+      "CUDA vs Triton": "+0.0%"
     },
     {
       "batch_size": 1024,
-      "PyTorch Eager": 35.840000957250595,
-      "torch.compile": 38.91199827194214,
-      "Fused Triton": 8.128000423312187,
-      "Triton Speedup": "4.41x"
+      "PyTorch Eager": 36.86400130391121,
+      "Fused Triton": 9.216000325977802,
+      "Custom Kolibri CUDA": 8.383999578654766,
+      "Triton Speedup": "4.00x",
+      "CUDA Speedup": "4.40x",
+      "CUDA vs Triton": "+9.0%"
     },
     {
       "batch_size": 2048,
-      "PyTorch Eager": 52.22399905323982,
-      "torch.compile": 55.296000093221664,
-      "Fused Triton": 9.216000325977802,
-      "Triton Speedup": "5.67x"
+      "PyTorch Eager": 55.296000093221664,
+      "Fused Triton": 11.264000087976456,
+      "Custom Kolibri CUDA": 11.264000087976456,
+      "Triton Speedup": "4.91x",
+      "CUDA Speedup": "4.91x",
+      "CUDA vs Triton": "+0.0%"
     }
   ]
 }

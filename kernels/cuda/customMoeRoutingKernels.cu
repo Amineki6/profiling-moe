@@ -477,7 +477,7 @@ void gate_forward(void* scores_in, // [batch_size, nExperts] - pre-computed from
         break;
     default: TLLM_CHECK_WITH_INFO(false, "gate_forward only supports n_experts 256 or 384");
     }
-    sync_check_cuda_error(stream);
+    // sync_check_cuda_error(stream); // Removed sync to test asynchronous execution
 }
 
 } // namespace kernels

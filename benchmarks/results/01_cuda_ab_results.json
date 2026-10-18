@@ -1,0 +1,140 @@
+{
+  "benchmark": "cuda_router_ab_test",
+  "timestamp": "2026-10-17T03:17:24.779348",
+  "device": "NVIDIA GeForce RTX 4090",
+  "experts": 384,
+  "top_k": 6,
+  "dtype": "torch.float32",
+  "results": [
+    {
+      "batch_size": 1,
+      "vA_us": 5.216000135987997,
+      "vB_us": 5.119999870657921,
+      "vFloat4_us": 5.119999870657921,
+      "delta_us": 0.0,
+      "delta_pct": 0.0,
+      "speedup_vs_vB": 1.0,
+      "speedup_vs_vA": 1.0187500522959467
+    },
+    {
+      "batch_size": 2,
+      "vA_us": 5.95200015231967,
+      "vB_us": 5.119999870657921,
+      "vFloat4_us": 5.119999870657921,
+      "delta_us": 0.0,
+      "delta_pct": 0.0,
+      "speedup_vs_vB": 1.0,
+      "speedup_vs_vA": 1.162500059117157
+    },
+    {
+      "batch_size": 4,
+      "vA_us": 5.919999908655882,
+      "vB_us": 5.119999870657921,
+      "vFloat4_us": 5.119999870657921,
+      "delta_us": 0.0,
+      "delta_pct": 0.0,
+      "speedup_vs_vB": 1.0,
+      "speedup_vs_vA": 1.156250011368684
+    },
+    {
+      "batch_size": 8,
+      "vA_us": 5.904000019654632,
+      "vB_us": 6.144000217318535,
+      "vFloat4_us": 5.375999957323074,
+      "delta_us": 0.7680002599954605,
+      "delta_pct": 12.500003789561124,
+      "speedup_vs_vB": 1.1428571923534536,
+      "speedup_vs_vA": 1.0982142980883633
+    },
+    {
+      "batch_size": 16,
+      "vA_us": 5.119999870657921,
+      "vB_us": 6.144000217318535,
+      "vFloat4_us": 6.111999973654747,
+      "delta_us": 0.03200024366378784,
+      "delta_pct": 0.5208372807928369,
+      "speedup_vs_vB": 1.005235641983266,
+      "speedup_vs_vA": 0.837696317527363
+    },
+    {
+      "batch_size": 32,
+      "vA_us": 5.119999870657921,
+      "vB_us": 6.144000217318535,
+      "vFloat4_us": 6.0800001956522465,
+      "delta_us": 0.06400002166628838,
+      "delta_pct": 1.0416669824634268,
+      "speedup_vs_vB": 1.0105263190142748,
+      "speedup_vs_vA": 0.842105214785879
+    },
+    {
+      "batch_size": 64,
+      "vA_us": 5.119999870657921,
+      "vB_us": 6.144000217318535,
+      "vFloat4_us": 6.144000217318535,
+      "delta_us": 0.0,
+      "delta_pct": 0.0,
+      "speedup_vs_vB": 1.0,
+      "speedup_vs_vA": 0.8333332828058517
+    },
+    {
+      "batch_size": 128,
+      "vA_us": 6.144000217318535,
+      "vB_us": 6.144000217318535,
+      "vFloat4_us": 6.144000217318535,
+      "delta_us": 0.0,
+      "delta_pct": 0.0,
+      "speedup_vs_vB": 1.0,
+      "speedup_vs_vA": 1.0
+    },
+    {
+      "batch_size": 256,
+      "vA_us": 6.144000217318535,
+      "vB_us": 6.87999976798892,
+      "vFloat4_us": 7.104000076651573,
+      "delta_us": -0.22400030866265297,
+      "delta_pct": -3.2558185496586156,
+      "speedup_vs_vB": 0.9684684253595568,
+      "speedup_vs_vA": 0.8648648861240542
+    },
+    {
+      "batch_size": 512,
+      "vA_us": 7.168000098317862,
+      "vB_us": 7.168000098317862,
+      "vFloat4_us": 7.168000098317862,
+      "delta_us": 0.0,
+      "delta_pct": 0.0,
+      "speedup_vs_vB": 1.0,
+      "speedup_vs_vA": 1.0
+    },
+    {
+      "batch_size": 1024,
+      "vA_us": 9.344000369310379,
+      "vB_us": 9.216000325977802,
+      "vFloat4_us": 9.216000325977802,
+      "delta_us": 0.0,
+      "delta_pct": 0.0,
+      "speedup_vs_vB": 1.0,
+      "speedup_vs_vA": 1.0138888930995125
+    },
+    {
+      "batch_size": 2048,
+      "vA_us": 12.28800043463707,
+      "vB_us": 11.264000087976456,
+      "vFloat4_us": 11.264000087976456,
+      "delta_us": 0.0,
+      "delta_pct": 0.0,
+      "speedup_vs_vB": 1.0,
+      "speedup_vs_vA": 1.0909091209750312
+    },
+    {
+      "batch_size": 4096,
+      "vA_us": 19.45599913597107,
+      "vB_us": 18.432000651955605,
+      "vFloat4_us": 16.51199907064438,
+      "delta_us": 1.920001581311226,
+      "delta_pct": 10.416674877382434,
+      "speedup_vs_vB": 1.116279172079453,
+      "speedup_vs_vA": 1.178294587634797
+    }
+  ]
+}
