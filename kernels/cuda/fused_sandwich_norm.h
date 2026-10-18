@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,22 +17,27 @@
 #pragma once
 
 #include "tensorrt_llm/common/config.h"
-#include "tensorrt_llm/common/cudaUtils.h"
-#include "tensorrt_llm/common/quantization.h"
-#include <assert.h>
-#include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 
 TRTLLM_NAMESPACE_BEGIN
 
 namespace kernels
 {
 
-template <typename T, typename QuantT>
-void invokeGeneralRmsNorm(T* out, T const* input, T const* gamma, T const* beta, float const eps, int const tokens,
-    int const hidden_dim, tensorrt_llm::common::QuantMode quantMode, cudaStream_t stream = 0,
-    float const* clampPtr = nullptr, float const* scale = nullptr, float* dynamic_scale = nullptr,
-    float* sum_per_token = nullptr, QuantT* out_quant = nullptr);
+template <typename T>
+void invokeFusedSandwichResidualNorm(
+    T const* attn_out,
+    T const* residual_in,
+    T const* gamma1,
+    T const* gamma2,
+    T* updated_residual_out,
+    T* moe_in_out,
+    float const eps,
+    int const tokens,
+    int const hidden_dim,
+    cudaStream_t stream);
 
 } // namespace kernels
 
