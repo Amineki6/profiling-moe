@@ -102,7 +102,7 @@ def partition_0(args):
 
 ## 5. Hardware Ground Truth: Nsight Systems Profiling
 
-Inspecting the hardware silicon timeline (`traces/01_router_comparison.nsys-rep` capture under NVIDIA Nsight Systems) exposes the raw microarchitectural difference:
+Inspecting the hardware silicon timeline ([`traces/01_router/01_router_comparison.nsys-rep`](file:///home/mkina/profiling/profiling-moe/traces/01_router/01_router_comparison.nsys-rep) capture under NVIDIA Nsight Systems) exposes the raw microarchitectural difference:
 
 ### A. Eager & Compiled Pipeline Execution (Disjoint Kernels)
 Under PyTorch Eager / `torch.compile`, a single routing pass dispatches **5 individual CUDA kernels** sequentially:

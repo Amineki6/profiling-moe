@@ -6,10 +6,12 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Repo root is 3 levels up: kernels/cuda/ -> kernels/ -> profiling-moe/ -> profiling/
 TRT_LLM_CPP = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", "..", "TensorRT-LLM", "cpp"))
 
-# Ensure CUDA compiler is in PATH
+import sys
+
+# Ensure CUDA compiler and conda bin (ninja) are in PATH
+python_bin = os.path.dirname(sys.executable)
 cuda_bin = "/usr/local/cuda/bin"
-if cuda_bin not in os.environ.get("PATH", ""):
-    os.environ["PATH"] = cuda_bin + ":" + os.environ.get("PATH", "")
+os.environ["PATH"] = f"{python_bin}:{cuda_bin}:{os.environ.get('PATH', '')}"
 
 # JIT-compile both original (vA) and edited register-cached (vB) kernels
 kolibri_cuda_ops = load(

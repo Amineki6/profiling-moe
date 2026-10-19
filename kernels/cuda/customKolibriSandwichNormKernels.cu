@@ -15,9 +15,12 @@
  */
 
 #include "tensorrt_llm/common/config.h"
+#include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/cudaTypeUtils.cuh"
+#include "tensorrt_llm/common/cudaFp8Utils.h"
+#include "tensorrt_llm/common/quantTypeUtils.cuh"
 #include "tensorrt_llm/common/reduceKernelUtils.cuh"
-#include "fused_sandwich_norm.h"
+#include "customKolibriSandwichNormKernels.h"
 
 using namespace tensorrt_llm::common;
 
@@ -25,6 +28,13 @@ TRTLLM_NAMESPACE_BEGIN
 
 namespace kernels
 {
+
+template <typename Tf, typename T>
+__inline__ __device__ Tf compute_rmsnorm(Tf val, float s_variance, T const* gamma, int i)
+{
+    Tf ret = val * s_variance * cuda_cast<Tf>(gamma[i]);
+    return ret;
+}
 
 /*
  * Fused Sandwich Norm + Residual Add + Pre-MoE Norm Kernel
@@ -38,7 +48,7 @@ namespace kernels
  *   - Grid Dim: (num_tokens) -> One thread block (CTA) per token row
  *   - Block Dim: min(hidden_dim, 1024) (must be multiple of 32 for warp shuffles)
  */
-template <typename T>
+template <typename T, bool USE_SHMEM>
 __global__ void fusedSandwichResidualNormKernel(
     T const* attn_out,         // [tokens, hidden_dim]
     T const* residual_in,      // [tokens, hidden_dim]
@@ -52,6 +62,9 @@ __global__ void fusedSandwichResidualNormKernel(
     constexpr auto num_elems_T = num_elems<T>::value;
     using float_packed_t = typename packed_as<float, num_elems_T>::type;
 
+    extern __shared__ __align__(sizeof(float)) char _shmem[];
+    T* shmem = reinterpret_cast<T*>(_shmem);
+
     int const tidx = threadIdx.x;
     int const bidx = blockIdx.x;
     int const n_elems = hidden_dim / num_elems_T;
@@ -59,17 +72,93 @@ __global__ void fusedSandwichResidualNormKernel(
     __shared__ float s_variance1;
     __shared__ float s_variance2;
 
-    // TODO: Step 1 - Compute sum of squares for attn_out (variance 1)
+    // Compute variance for sandwich norm (attn_out)
+    float local_var_sum = 0.0f;
+    float sum = 0.0f;
+    float variance = 0.0f;
 
-    // TODO: Step 2 - Block reduction for variance 1 and compute 1/sqrt(var1 + eps)
+    for (int i = tidx; i < n_elems; i += blockDim.x)
+    {
+        T val = attn_out[bidx * n_elems + i];
+        
+        // Cache loaded activation in shared memory to avoid redundant DRAM reads
+        if (USE_SHMEM)
+        {
+            shmem[i] = val;
+        }
 
-    // TODO: Step 3 - Apply RMSNorm 1 (gamma1) in registers, add to residual_in, store to updated_residual_out
+        float_packed_t const val_f = cuda_cast<float_packed_t>(val);
+        local_var_sum += cuda_sum<float>(val_f * val_f);
+    }
 
-    // TODO: Step 4 - Compute sum of squares for updated_residual (variance 2)
+    // Inter-warp block reduction across CTA
+    float packed[1] = {local_var_sum};
+    blockReduceSumV2<float, 1>(packed);
+    sum = packed[0];
 
-    // TODO: Step 5 - Block reduction for variance 2 and compute 1/sqrt(var2 + eps)
+    // Compute scale factor 1/sqrt(var + eps) and broadcast to block
+    if (threadIdx.x == 0)
+    {
+        variance = (sum / hidden_dim);
+        s_variance1 = rsqrtf(variance + eps);
+    }
+    __syncthreads();
 
-    // TODO: Step 6 - Apply RMSNorm 2 (gamma2) and write to moe_in_out
+    // Post-attention norm, in-register residual addition, and accumulate pre-MoE variance
+    local_var_sum = 0.0f;
+    for (int i = tidx; i < n_elems; i += blockDim.x)
+    {
+        int const index = bidx * n_elems + i;
+
+        // Read activation from shared memory cache
+        float_packed_t const val_f = cuda_cast<float_packed_t>(USE_SHMEM ? shmem[i] : attn_out[index]);
+
+        // Apply sandwich norm weight
+        T val = cuda_cast<T>(compute_rmsnorm(val_f, s_variance1, gamma1, i));
+
+        // Add residual stream directly in registers
+        T residual = residual_in[index];
+        T res = val + residual;
+
+        // Cache updated residual in shared memory for final norm
+        if (USE_SHMEM)
+        {
+            shmem[i] = res;
+        }
+
+        // Save updated residual to global memory for later skip connection
+        updated_residual_out[index] = res;
+
+        // Accumulate variance for pre-MoE norm
+        float_packed_t const res_f = cuda_cast<float_packed_t>(res);
+        local_var_sum += cuda_sum<float>(res_f * res_f);
+    }
+
+    // Inter-warp block reduction for updated residual variance
+    packed[0] = local_var_sum;
+    blockReduceSumV2<float, 1>(packed);
+    sum = packed[0];
+
+    // Compute pre-MoE scale factor and broadcast to block
+    if (threadIdx.x == 0)
+    {
+        variance = (sum / hidden_dim);
+        s_variance2 = rsqrtf(variance + eps);
+    }
+    __syncthreads();
+
+    // Pre-MoE norm and write to output buffer
+    for (int i = tidx; i < n_elems; i += blockDim.x)
+    {
+        int const index = bidx * n_elems + i;
+
+        // Read updated residual from shared memory cache
+        float_packed_t const val_f = cuda_cast<float_packed_t>(USE_SHMEM ? shmem[i] : updated_residual_out[index]);
+
+        // Apply pre-MoE norm weight and write out
+        T val = cuda_cast<T>(compute_rmsnorm(val_f, s_variance2, gamma2, i));
+        moe_in_out[index] = val;
+    }
 }
 
 template <typename T>
@@ -86,10 +175,11 @@ void invokeFusedSandwichResidualNorm(
     cudaStream_t stream)
 {
     dim3 grid(tokens);
-    dim3 block(min(hidden_dim, 1024));
+    dim3 block(min(hidden_dim, 256));
     block.x = 32 * ((block.x + 31) / 32);
 
-    constexpr size_t vec_size = 2;
+    constexpr int vec_size = 2;
+    size_t const shmem_size = hidden_dim * sizeof(T);
     bool const use_vec_type = (hidden_dim % vec_size == 0)
         && (std::is_same<T, half>::value
 #ifdef ENABLE_BF16
@@ -100,7 +190,7 @@ void invokeFusedSandwichResidualNorm(
     if (use_vec_type)
     {
         using Tp = typename packed_as<T, vec_size>::type;
-        fusedSandwichResidualNormKernel<Tp><<<grid, block, 0, stream>>>(
+        fusedSandwichResidualNormKernel<Tp, true><<<grid, block, shmem_size, stream>>>(
             reinterpret_cast<Tp const*>(attn_out),
             reinterpret_cast<Tp const*>(residual_in),
             reinterpret_cast<Tp const*>(gamma1),
@@ -112,7 +202,7 @@ void invokeFusedSandwichResidualNorm(
     }
     else
     {
-        fusedSandwichResidualNormKernel<T><<<grid, block, 0, stream>>>(
+        fusedSandwichResidualNormKernel<T, true><<<grid, block, shmem_size, stream>>>(
             attn_out,
             residual_in,
             gamma1,
