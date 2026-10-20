@@ -28,23 +28,59 @@ namespace kernels
 {
 
 /**
- * Fused Kolibri Router + CUTLASS Expert Dispatch Mapping + Activation Expansion
+ * Kernel 1: Kolibri Router + CUTLASS Dispatch Mapping (Single Block)
  *
- * Fuses:
- *   1. Custom Kolibri Top-K Router (scores + bias -> top-6 + sigmoid on raw scores)
- *   2. CUB-based Expert Map Sort & Prefix Sum (out_indices -> expert_first_token_offset, permutation tables)
- *   3. Activation Row Expansion (unpermuted_input [N, d] -> permuted_output [6*N, d] + permuted_scales [6*N])
+ * Computes top-6 routing and builds the dispatch permutation mapping in shared memory.
+ * Uses a 384-bin shared memory histogram and prefix sum (~3 KB), completely avoiding CUB overhead.
  *
  * Inputs:
- *   - unpermuted_input:           [N, hidden_size] (hidden activations, FP16 or BF16)
  *   - scores_in:                  [N, num_experts] (raw routing logits from router FC, FP32)
  *   - bias:                       [num_experts]    (routing bias terms, FP32)
  *
  * Outputs:
- *   - permuted_output:            [N * top_k, hidden_size] (CUTLASS FC1 GEMM input)
- *   - permuted_scales:            [N * top_k]              (routing scale for each expanded row)
+ *   - permuted_weights:           [N * top_k]              (routing sigmoid scale for each expanded row)
  *   - permuted_row_to_unpermuted: [N * top_k]              (mapping needed for FC2 unpermutation)
+ *   - permuted_token_ids:         [N * top_k]              (source token index for each expanded row)
  *   - expert_first_token_offset:  [num_experts + 1]        (histogram prefix sums for CUTLASS Grouped GEMM)
+ */
+void invokeKolibriRouterDispatchMap(
+    float const* scores_in,
+    float const* bias,
+    float* permuted_weights,
+    int* permuted_row_to_unpermuted_row,
+    int* permuted_token_ids,
+    int64_t* expert_first_token_offset,
+    int const num_tokens,
+    int const num_experts,
+    int const top_k,
+    cudaStream_t stream);
+
+/**
+ * Kernel 2: Activation Row Expansion & Permutation (Multi-Block Grid across all SMs)
+ *
+ * Distributes expanded rows across all available SMs on the GPU.
+ * Uses 128-bit vectorized (uint4 = 16 bytes = 8 FP16/BF16 elements) coalesced memory transfers.
+ *
+ * Inputs:
+ *   - unpermuted_input:           [N, hidden_size]         (hidden activations, FP16 or BF16)
+ *   - permuted_token_ids:         [N * top_k]              (source token index for each expanded row)
+ *
+ * Outputs:
+ *   - permuted_output:            [N * top_k, hidden_size] (CUTLASS FC1 GEMM input)
+ */
+template <typename T>
+void invokeKolibriActivationExpansion(
+    T const* unpermuted_input,
+    T* permuted_output,
+    int const* permuted_token_ids,
+    int const num_expanded_rows,
+    int const hidden_size,
+    cudaStream_t stream);
+
+/**
+ * Pipelined Execution: Kernel 1 followed by Kernel 2 on the same CUDA stream.
+ *
+ * Eliminates kernel launch gaps and intermediate DRAM roundtrips on router outputs.
  */
 template <typename T>
 void invokeFusedKolibriRouterDispatch(
@@ -55,6 +91,7 @@ void invokeFusedKolibriRouterDispatch(
     float* permuted_scales,
     int* permuted_row_to_unpermuted_row,
     int64_t* expert_first_token_offset,
+    int* permuted_token_ids,
     int const num_tokens,
     int const hidden_size,
     int const num_experts,
