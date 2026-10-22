@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
+#include <cuda_fp8.h>
 #include <c10/cuda/CUDAStream.h>
 #include "customKolibriBuildExpertMapsKernel.h"
 #include <vector>
@@ -108,8 +109,36 @@ th::Tensor kolibri_activation_expansion(
 #else
         TORCH_CHECK(false, "BF16 support not enabled");
 #endif
+    } else if (unpermuted_input.scalar_type() == at::kFloat8_e4m3fn) {
+#ifdef ENABLE_FP8
+        tensorrt_llm::kernels::invokeKolibriActivationExpansionFromMap<__nv_fp8_e4m3>(
+            reinterpret_cast<__nv_fp8_e4m3 const*>(unpermuted_input.data_ptr()),
+            reinterpret_cast<__nv_fp8_e4m3*>(permuted_output.data_ptr()),
+            reinterpret_cast<int const*>(permuted_row_to_unpermuted_row.data_ptr()),
+            num_tokens,
+            num_expanded_rows,
+            hidden_size,
+            stream.stream()
+        );
+#else
+        TORCH_CHECK(false, "FP8 support not enabled");
+#endif
+    } else if (unpermuted_input.scalar_type() == at::kFloat8_e5m2) {
+#ifdef ENABLE_FP8
+        tensorrt_llm::kernels::invokeKolibriActivationExpansionFromMap<__nv_fp8_e5m2>(
+            reinterpret_cast<__nv_fp8_e5m2 const*>(unpermuted_input.data_ptr()),
+            reinterpret_cast<__nv_fp8_e5m2*>(permuted_output.data_ptr()),
+            reinterpret_cast<int const*>(permuted_row_to_unpermuted_row.data_ptr()),
+            num_tokens,
+            num_expanded_rows,
+            hidden_size,
+            stream.stream()
+        );
+#else
+        TORCH_CHECK(false, "FP8 support not enabled");
+#endif
     } else {
-        TORCH_CHECK(false, "Unsupported dtype: only float16 and bfloat16 are supported");
+        TORCH_CHECK(false, "Unsupported dtype: only float16, bfloat16, float8_e4m3fn, and float8_e5m2 are supported");
     }
 
     return permuted_output;

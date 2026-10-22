@@ -18,6 +18,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <cstdint>
 #include <algorithm>
 #include <stdexcept>
@@ -105,6 +106,24 @@ template void invokeKolibriActivationExpansion<half>(
 template void invokeKolibriActivationExpansion<__nv_bfloat16>(
     __nv_bfloat16 const* unpermuted_input,
     __nv_bfloat16* permuted_output,
+    int const* permuted_token_ids,
+    int const num_expanded_rows,
+    int const hidden_size,
+    cudaStream_t stream);
+#endif
+
+#ifdef ENABLE_FP8
+template void invokeKolibriActivationExpansion<__nv_fp8_e4m3>(
+    __nv_fp8_e4m3 const* unpermuted_input,
+    __nv_fp8_e4m3* permuted_output,
+    int const* permuted_token_ids,
+    int const num_expanded_rows,
+    int const hidden_size,
+    cudaStream_t stream);
+
+template void invokeKolibriActivationExpansion<__nv_fp8_e5m2>(
+    __nv_fp8_e5m2 const* unpermuted_input,
+    __nv_fp8_e5m2* permuted_output,
     int const* permuted_token_ids,
     int const num_expanded_rows,
     int const hidden_size,

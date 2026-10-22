@@ -225,6 +225,10 @@ To achieve scalable high performance across both decode and prefill regimes, the
    * **Step 2 (Precision-Agnostic Sort & Map)**: Replaces TRT-LLM's CUB `BlockRadixRank` (which hits the 99 KB SRAM ceiling at $>32$ threads) with a custom 256-thread 384-bin shared histogram and prefix sum. This slashes SRAM by **-90.6% (3.0 KB vs 32.1 KB)**, speeds up mapping by **1.32x** (2.75 µs vs 3.64 µs), and **completely eliminates TRT-LLM's 3-kernel multi-pass fallback** at large batches. This algorithmic optimization is universal across all precisions (FP4, FP8, and BF16).
    * **Step 3 (Zero-Cost Vectorized Expansion)**: Rather than using TRT-LLM's monolithic template that burdens BF16 copies with 64-bit integer division and 32-register pressure from unused quantization logic, our decoupled 128-bit (`uint4`) gather-scatter runs with **18 registers/thread** and native 32-bit math, accelerating expansion by **1.82x** (5.24 µs vs 9.51 µs at $N=256$).
 
+3. **Universal Precision Reach (FP8 & BF16)**:
+   * **Step 2** is completely precision-agnostic: token mapping operates strictly on `int32` metadata.
+   * **Step 3** natively supports both BF16 and FP8 (`torch.float8_e4m3fn`, `torch.float8_e5m2`) via `<cuda_fp8.h>` template instantiations. In FP8 mode, the 128-bit `uint4` transfer moves **16 elements per instruction** (vs 8 in BF16), slashing Step 3 execution from 5.52 µs to **3.60 µs (1.53x speedup)** at $N = 256$ with bit-for-bit exactness.
+
 ---
 
 #### 4.3.4 Microarchitectural Metrics Table (Pending NCU Access)
