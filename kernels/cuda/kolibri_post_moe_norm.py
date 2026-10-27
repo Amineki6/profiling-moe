@@ -52,3 +52,10 @@ def fused_add_post_moe_norm(routed_out: torch.Tensor, shared_out: torch.Tensor, 
         moe_out = RMSNorm(routed_out + shared_out, gamma)
     """
     return kolibri_post_moe_norm_ops.fused_add_post_moe_norm(routed_out, shared_out, gamma, eps)
+
+def copy_baseline(routed_out: torch.Tensor, shared_out: torch.Tensor):
+    """
+    Pure 2-in 1-out 128-bit Copy Baseline (Upper-bound DRAM/L2 speed-of-light test).
+    Reads routed_out + shared_out (11.8 MB at n=1152) and writes moe_out (5.9 MB).
+    """
+    return kolibri_post_moe_norm_ops.copy_baseline(routed_out, shared_out)

@@ -48,8 +48,8 @@ namespace common {
 }
 
 namespace kernels {
+    void kolibri_gate_forward(void* scores_in, void* bias, void* input_ids, void* tid2eid, void* out_weights, void* out_indices, int batch_size, int n_experts, float route_scale, bool is_hash, cudaStream_t stream);
     void gate_forward(void* scores_in, void* bias, void* input_ids, void* tid2eid, void* out_weights, void* out_indices, int batch_size, int n_experts, float route_scale, bool is_hash, cudaStream_t stream);
-    void gate_forward_vB(void* scores_in, void* bias, void* input_ids, void* tid2eid, void* out_weights, void* out_indices, int batch_size, int n_experts, float route_scale, bool is_hash, cudaStream_t stream);
     void gate_forward_vFloat4(void* scores_in, void* bias, void* input_ids, void* tid2eid, void* out_weights, void* out_indices, int batch_size, int n_experts, float route_scale, bool is_hash, cudaStream_t stream);
 }
 
@@ -103,12 +103,16 @@ static std::tuple<th::Tensor, th::Tensor> run_gate_forward_helper(
     return {out_indices, out_weights};
 }
 
-std::tuple<th::Tensor, th::Tensor> forward_vA(th::Tensor logits, th::Tensor bias, int64_t topk) {
-    return run_gate_forward_helper(&tensorrt_llm::kernels::gate_forward, logits, bias, topk);
+std::tuple<th::Tensor, th::Tensor> forward(th::Tensor logits, th::Tensor bias, int64_t topk) {
+    return run_gate_forward_helper(&tensorrt_llm::kernels::kolibri_gate_forward, logits, bias, topk);
 }
 
 std::tuple<th::Tensor, th::Tensor> forward_vB(th::Tensor logits, th::Tensor bias, int64_t topk) {
-    return run_gate_forward_helper(&tensorrt_llm::kernels::gate_forward_vB, logits, bias, topk);
+    return run_gate_forward_helper(&tensorrt_llm::kernels::kolibri_gate_forward, logits, bias, topk);
+}
+
+std::tuple<th::Tensor, th::Tensor> forward_vA(th::Tensor logits, th::Tensor bias, int64_t topk) {
+    return run_gate_forward_helper(&tensorrt_llm::kernels::kolibri_gate_forward, logits, bias, topk);
 }
 
 std::tuple<th::Tensor, th::Tensor> forward_vFloat4(th::Tensor logits, th::Tensor bias, int64_t topk) {
@@ -116,7 +120,8 @@ std::tuple<th::Tensor, th::Tensor> forward_vFloat4(th::Tensor logits, th::Tensor
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("forward_vA", &forward_vA, "Kolibri MoE Router CUDA vA (Original)");
-    m.def("forward_vB", &forward_vB, "Kolibri MoE Router CUDA vB (Edited Registers)");
+    m.def("forward", &forward, "Kolibri MoE Router CUDA (Production Standard)");
+    m.def("forward_vB", &forward_vB, "Kolibri MoE Router CUDA (Alias to standard forward)");
+    m.def("forward_vA", &forward_vA, "Kolibri MoE Router CUDA (Alias to standard forward)");
     m.def("forward_vFloat4", &forward_vFloat4, "Kolibri MoE Router CUDA vFloat4 (Vectorized 128-bit Loads)");
 }

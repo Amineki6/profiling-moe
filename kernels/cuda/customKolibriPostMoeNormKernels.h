@@ -43,6 +43,15 @@ void invokeFusedAddPostMoeNorm(
     int const hidden_dim,
     cudaStream_t stream);
 
+template <typename T>
+void invokeCopyBaselinePostMoe(
+    T const* in1,
+    T const* in2,
+    T* out,
+    int const tokens,
+    int const hidden_dim,
+    cudaStream_t stream);
+
 } // namespace kernels
 
 TRTLLM_NAMESPACE_END

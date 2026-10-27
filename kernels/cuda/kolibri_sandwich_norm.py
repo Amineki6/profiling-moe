@@ -60,3 +60,10 @@ def fused_sandwich_norm(attn_out: torch.Tensor, residual_in: torch.Tensor, gamma
         (updated_residual_out, moe_in_out)
     """
     return kolibri_sandwich_norm_ops.fused_sandwich_norm(attn_out, residual_in, gamma1, gamma2, eps)
+
+def copy_baseline(attn_out: torch.Tensor, residual_in: torch.Tensor):
+    """
+    Pure 2-in 2-out 128-bit Copy Baseline (Upper-bound DRAM/L2 speed-of-light test).
+    Reads attn_out + residual_in (11.8 MB at n=1152) and writes out1 + out2 (11.8 MB).
+    """
+    return kolibri_sandwich_norm_ops.copy_baseline(attn_out, residual_in)

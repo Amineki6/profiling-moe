@@ -13,13 +13,11 @@ python_bin = os.path.dirname(sys.executable)
 cuda_bin = "/usr/local/cuda/bin"
 os.environ["PATH"] = f"{python_bin}:{cuda_bin}:{os.environ.get('PATH', '')}"
 
-# JIT-compile both original (vA) and edited register-cached (vB) kernels
+# JIT-compile standard Kolibri MoE routing kernel (with 128-bit float4 loads & 100% in-register scores)
 kolibri_cuda_ops = load(
     name="kolibri_cuda_ops",
     sources=[
-        os.path.join(CURRENT_DIR, "customMoeRoutingKernels.cu"),
         os.path.join(CURRENT_DIR, "customKolibriRoutingKernels.cu"),
-        os.path.join(CURRENT_DIR, "customKolibriRoutingKernelsFloat4.cu"),
         os.path.join(CURRENT_DIR, "router_bindings.cpp"),
     ],
     extra_cuda_cflags=[

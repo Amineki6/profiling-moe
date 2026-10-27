@@ -126,6 +126,64 @@ std::tuple<th::Tensor, th::Tensor> fused_sandwich_norm(
     return std::make_tuple(updated_residual_out, moe_in_out);
 }
 
+std::tuple<th::Tensor, th::Tensor> copy_baseline(
+    th::Tensor in1,
+    th::Tensor in2
+) {
+    TORCH_CHECK(in1.is_cuda() && in2.is_cuda(), "Inputs must be CUDA tensors");
+    TORCH_CHECK(in1.is_contiguous() && in2.is_contiguous(), "Inputs must be contiguous");
+    TORCH_CHECK(in1.sizes() == in2.sizes(), "Input sizes must match");
+
+    int const hidden_dim = in1.size(-1);
+    int const tokens = in1.numel() / hidden_dim;
+
+    auto out1 = th::empty_like(in1);
+    auto out2 = th::empty_like(in2);
+
+    auto stream = at::cuda::getCurrentCUDAStream(in1.device().index());
+
+    if (in1.scalar_type() == th::kBFloat16) {
+#ifdef ENABLE_BF16
+        tensorrt_llm::kernels::invokeCopyBaseline<__nv_bfloat16>(
+            reinterpret_cast<__nv_bfloat16 const*>(in1.data_ptr()),
+            reinterpret_cast<__nv_bfloat16 const*>(in2.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(out1.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(out2.data_ptr()),
+            tokens,
+            hidden_dim,
+            stream.stream()
+        );
+#else
+        TORCH_CHECK(false, "BF16 support not enabled during compilation");
+#endif
+    } else if (in1.scalar_type() == th::kHalf) {
+        tensorrt_llm::kernels::invokeCopyBaseline<half>(
+            reinterpret_cast<half const*>(in1.data_ptr()),
+            reinterpret_cast<half const*>(in2.data_ptr()),
+            reinterpret_cast<half*>(out1.data_ptr()),
+            reinterpret_cast<half*>(out2.data_ptr()),
+            tokens,
+            hidden_dim,
+            stream.stream()
+        );
+    } else if (in1.scalar_type() == th::kFloat32) {
+        tensorrt_llm::kernels::invokeCopyBaseline<float>(
+            reinterpret_cast<float const*>(in1.data_ptr()),
+            reinterpret_cast<float const*>(in2.data_ptr()),
+            reinterpret_cast<float*>(out1.data_ptr()),
+            reinterpret_cast<float*>(out2.data_ptr()),
+            tokens,
+            hidden_dim,
+            stream.stream()
+        );
+    } else {
+        TORCH_CHECK(false, "Unsupported dtype");
+    }
+
+    return std::make_tuple(out1, out2);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("fused_sandwich_norm", &fused_sandwich_norm, "Custom Kolibri Fused Sandwich Norm (CUDA)");
+    m.def("copy_baseline", &copy_baseline, "Pure 2-in 2-out 128-bit Copy Baseline (CUDA)");
 }

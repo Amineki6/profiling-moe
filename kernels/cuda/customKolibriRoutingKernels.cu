@@ -1,6 +1,7 @@
 #include "tensorrt_llm/common/config.h"
 #include "tensorrt_llm/kernels/archCondition.h"
 #include "tensorrt_llm/kernels/moeTopKFuncs.cuh"
+#include "customKolibriRoutingKernels.h"
 #include <climits>
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
@@ -28,9 +29,11 @@ namespace kernels
 static constexpr int WARP_SIZE = 32;
 static constexpr int kTOPK = 6;
 
-// Edited gate forward kernel with register-kept scores (Variant B)
+// =================================================================================================
+// 1. Scalar Float Version: Standard Kolibri MoE router with in-register score accumulation
+// =================================================================================================
 template <int nExperts, int topK, bool hash>
-__global__ void gate_forward_kernel_vB(
+__global__ void kolibri_gate_forward_kernel(
     float const* __restrict__ scores_in,
     float const* __restrict__ bias,
     int const* __restrict__ input_ids,
@@ -40,39 +43,47 @@ __global__ void gate_forward_kernel_vB(
     int batch_size, float route_scale)
 {
     constexpr int kExpertsPerThread = nExperts / WARP_SIZE;
-    constexpr int kWarpsPerBlock = 8;
-
-    __shared__ float smem_scores[kWarpsPerBlock][nExperts];
+    constexpr int kPaddedExpertsPerThread = 16;
 
     int const global_warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
-    int const local_warp_id = (threadIdx.x / WARP_SIZE) % kWarpsPerBlock;
     int const lane_id = threadIdx.x % WARP_SIZE;
 
     if (global_warp_id >= batch_size)
         return;
 
     auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
-    float* my_smem = smem_scores[local_warp_id];
     float const* scores_row = scores_in + global_warp_id * nExperts;
     
-    float biased_scores[kExpertsPerThread];
-    int indices[kExpertsPerThread];
+    float biased_scores[kPaddedExpertsPerThread];
+    int indices[kPaddedExpertsPerThread];
 
 #pragma unroll
     for (int e = 0; e < kExpertsPerThread; ++e)
     {
         int expert_id = lane_id + e * WARP_SIZE;
-        float raw_score = scores_row[expert_id]; // Reads from DRAM
-        biased_scores[e] = raw_score + bias[expert_id];
+        float raw_score = scores_row[expert_id];
+        float b = 0.0f;
+        if constexpr (!hash)
+        {
+            if (bias != nullptr)
+            {
+                b = bias[expert_id];
+            }
+        }
+        biased_scores[e] = raw_score + b;
         indices[e] = expert_id;
-        my_smem[expert_id] = raw_score;
     }
-    __syncwarp();
+#pragma unroll
+    for (int e = kExpertsPerThread; e < kPaddedExpertsPerThread; ++e)
+    {
+        biased_scores[e] = -1e30f;
+        indices[e] = 65535;
+    }
 
     float topk_values[topK];
     int32_t topk_indices[topK];
     constexpr float minValue = -1e30f;
-    reduce_topk::reduceTopK<topK, float, kExpertsPerThread>(
+    reduce_topk::reduceTopK<topK, float, kPaddedExpertsPerThread>(
         warp, topk_values, topk_indices, biased_scores, indices, minValue, topK);
 
     float my_topk_value = 0.0f;
@@ -82,28 +93,149 @@ __global__ void gate_forward_kernel_vB(
     {
         int expert_id = topk_indices[lane_id];
         my_topk_index = expert_id;
-        my_topk_value = my_smem[expert_id];
+        float b = 0.0f;
+        if constexpr (!hash)
+        {
+            if (bias != nullptr)
+            {
+                b = bias[expert_id];
+            }
+        }
+        // Recover raw un-biased score directly from biased topk value: raw = biased - bias
+        my_topk_value = topk_values[lane_id] - b;
         float s = 1.0f / (1.0f + __expf(-my_topk_value));
 
         out_weights[global_warp_id * topK + lane_id] = s;
         out_indices[global_warp_id * topK + lane_id] = my_topk_index;
     }
-
 }
 
+// =================================================================================================
+// 2. Vectorized Float4 Version: 128-bit coalesced memory loads (4 experts per thread/iter)
+// =================================================================================================
+template <int nExperts, int topK, bool hash>
+__global__ void kolibri_gate_forward_kernel_vFloat4(
+    float const* __restrict__ scores_in,
+    float const* __restrict__ bias,
+    int const* __restrict__ input_ids,
+    int const* __restrict__ tid2eid,
+    float* __restrict__ out_weights,
+    int* __restrict__ out_indices,
+    int batch_size, float route_scale)
+{
+    constexpr int kExpertsPerThread = nExperts / WARP_SIZE;
+    constexpr int kPaddedExpertsPerThread = 16;
+    static_assert(kExpertsPerThread % 4 == 0, "kExpertsPerThread must be a multiple of 4 for float4 loading");
+
+    int const global_warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    int const lane_id = threadIdx.x % WARP_SIZE;
+
+    if (global_warp_id >= batch_size)
+        return;
+
+    auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+    float const* scores_row = scores_in + global_warp_id * nExperts;
+    
+    float biased_scores[kPaddedExpertsPerThread];
+    int indices[kPaddedExpertsPerThread];
+
+#pragma unroll
+    for (int e = 0; e < kExpertsPerThread / 4; ++e)
+    {
+        int base_expert = lane_id * 4 + e * (WARP_SIZE * 4);
+
+        float4 raw_scores = *reinterpret_cast<const float4*>(&scores_row[base_expert]);
+        float4 b = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if constexpr (!hash)
+        {
+            if (bias != nullptr)
+            {
+                b = *reinterpret_cast<const float4*>(&bias[base_expert]);
+            }
+        }
+
+        int local_base = e * 4;
+
+        biased_scores[local_base + 0] = raw_scores.x + b.x;
+        biased_scores[local_base + 1] = raw_scores.y + b.y;
+        biased_scores[local_base + 2] = raw_scores.z + b.z;
+        biased_scores[local_base + 3] = raw_scores.w + b.w;
+
+        indices[local_base + 0] = base_expert + 0;
+        indices[local_base + 1] = base_expert + 1;
+        indices[local_base + 2] = base_expert + 2;
+        indices[local_base + 3] = base_expert + 3;
+    }
+#pragma unroll
+    for (int e = kExpertsPerThread; e < kPaddedExpertsPerThread; ++e)
+    {
+        biased_scores[e] = -1e30f;
+        indices[e] = 65535;
+    }
+
+    float topk_values[topK];
+    int32_t topk_indices[topK];
+    constexpr float minValue = -1e30f;
+    reduce_topk::reduceTopK<topK, float, kPaddedExpertsPerThread>(
+        warp, topk_values, topk_indices, biased_scores, indices, minValue, topK);
+
+    float my_topk_value = 0.0f;
+    int my_topk_index = 0;
+
+    if (lane_id < topK)
+    {
+        int expert_id = topk_indices[lane_id];
+        my_topk_index = expert_id;
+        float b = 0.0f;
+        if constexpr (!hash)
+        {
+            if (bias != nullptr)
+            {
+                b = bias[expert_id];
+            }
+        }
+        // Recover raw un-biased score directly from biased topk value: raw = biased - bias
+        my_topk_value = topk_values[lane_id] - b;
+        float s = 1.0f / (1.0f + __expf(-my_topk_value));
+
+        out_weights[global_warp_id * topK + lane_id] = s;
+        out_indices[global_warp_id * topK + lane_id] = my_topk_index;
+    }
+}
+
+// =================================================================================================
+// Launchers
+// =================================================================================================
 template <int nExperts, bool hash>
-void launch_gate_forward_kernel_vB(float* scores_in, float* bias, int* input_ids, int* tid2eid, float* out_weights,
+void launch_kolibri_gate_forward_kernel(float* scores_in, float* bias, int* input_ids, int* tid2eid, float* out_weights,
     int* out_indices, int batch_size, float route_scale, cudaStream_t stream)
 {
     constexpr int warps_per_block = 8;
     constexpr int threads_per_block = warps_per_block * WARP_SIZE;
     int const blocks = (batch_size + warps_per_block - 1) / warps_per_block;
 
-    gate_forward_kernel_vB<nExperts, kTOPK, hash><<<blocks, threads_per_block, 0, stream>>>(
+    kolibri_gate_forward_kernel<nExperts, kTOPK, hash><<<blocks, threads_per_block, 0, stream>>>(
         scores_in, bias, input_ids, tid2eid, out_weights, out_indices, batch_size, route_scale);
 }
 
-void gate_forward_vB(void* scores_in, void* bias, void* input_ids, void* tid2eid, void* out_weights,
+template <int nExperts, bool hash>
+void launch_kolibri_gate_forward_kernel_vFloat4(float* scores_in, float* bias, int* input_ids, int* tid2eid, float* out_weights,
+    int* out_indices, int batch_size, float route_scale, cudaStream_t stream)
+{
+    constexpr int warps_per_block = 8;
+    constexpr int threads_per_block = warps_per_block * WARP_SIZE;
+    int const blocks = (batch_size + warps_per_block - 1) / warps_per_block;
+
+    kolibri_gate_forward_kernel_vFloat4<nExperts, kTOPK, hash><<<blocks, threads_per_block, 0, stream>>>(
+        scores_in, bias, input_ids, tid2eid, out_weights, out_indices, batch_size, route_scale);
+}
+
+// =================================================================================================
+// Entry Points
+// =================================================================================================
+
+// 1. Scalar Float Entry Point
+void kolibri_gate_forward(void* scores_in, void* bias, void* input_ids, void* tid2eid, void* out_weights,
     void* out_indices, int batch_size, int n_experts, float route_scale, bool is_hash, cudaStream_t stream)
 {
     auto* scores = static_cast<float*>(scores_in);
@@ -117,20 +249,58 @@ void gate_forward_vB(void* scores_in, void* bias, void* input_ids, void* tid2eid
     {
     case 256:
         if (is_hash)
-            launch_gate_forward_kernel_vB<256, true>(scores, nullptr, input_ids_ptr, tid2eid_ptr, weights, indices, batch_size, route_scale, stream);
+            launch_kolibri_gate_forward_kernel<256, true>(scores, nullptr, input_ids_ptr, tid2eid_ptr, weights, indices, batch_size, route_scale, stream);
         else
-            launch_gate_forward_kernel_vB<256, false>(scores, bias_ptr, nullptr, nullptr, weights, indices, batch_size, route_scale, stream);
+            launch_kolibri_gate_forward_kernel<256, false>(scores, bias_ptr, nullptr, nullptr, weights, indices, batch_size, route_scale, stream);
         break;
     case 384:
         if (is_hash)
-            launch_gate_forward_kernel_vB<384, true>(scores, nullptr, input_ids_ptr, tid2eid_ptr, weights, indices, batch_size, route_scale, stream);
+            launch_kolibri_gate_forward_kernel<384, true>(scores, nullptr, input_ids_ptr, tid2eid_ptr, weights, indices, batch_size, route_scale, stream);
         else
-            launch_gate_forward_kernel_vB<384, false>(scores, bias_ptr, nullptr, nullptr, weights, indices, batch_size, route_scale, stream);
+            launch_kolibri_gate_forward_kernel<384, false>(scores, bias_ptr, nullptr, nullptr, weights, indices, batch_size, route_scale, stream);
         break;
     default:
-        TLLM_CHECK_WITH_INFO(false, "gate_forward_vB only supports n_experts 256 or 384");
+        TLLM_CHECK_WITH_INFO(false, "kolibri_gate_forward only supports n_experts 256 or 384");
     }
     sync_check_cuda_error(stream);
+}
+
+// 2. Vectorized Float4 Entry Point
+void gate_forward_vFloat4(void* scores_in, void* bias, void* input_ids, void* tid2eid, void* out_weights,
+    void* out_indices, int batch_size, int n_experts, float route_scale, bool is_hash, cudaStream_t stream)
+{
+    auto* scores = static_cast<float*>(scores_in);
+    auto* bias_ptr = static_cast<float*>(bias);
+    auto* input_ids_ptr = static_cast<int*>(input_ids);
+    auto* tid2eid_ptr = static_cast<int*>(tid2eid);
+    auto* weights = static_cast<float*>(out_weights);
+    auto* indices = static_cast<int*>(out_indices);
+
+    switch (n_experts)
+    {
+    case 256:
+        if (is_hash)
+            launch_kolibri_gate_forward_kernel_vFloat4<256, true>(scores, nullptr, input_ids_ptr, tid2eid_ptr, weights, indices, batch_size, route_scale, stream);
+        else
+            launch_kolibri_gate_forward_kernel_vFloat4<256, false>(scores, bias_ptr, nullptr, nullptr, weights, indices, batch_size, route_scale, stream);
+        break;
+    case 384:
+        if (is_hash)
+            launch_kolibri_gate_forward_kernel_vFloat4<384, true>(scores, nullptr, input_ids_ptr, tid2eid_ptr, weights, indices, batch_size, route_scale, stream);
+        else
+            launch_kolibri_gate_forward_kernel_vFloat4<384, false>(scores, bias_ptr, nullptr, nullptr, weights, indices, batch_size, route_scale, stream);
+        break;
+    default:
+        TLLM_CHECK_WITH_INFO(false, "gate_forward_vFloat4 only supports n_experts 256 or 384");
+    }
+    sync_check_cuda_error(stream);
+}
+
+// Standard TRT-LLM interface (aliases to scalar version)
+void gate_forward(void* scores_in, void* bias, void* input_ids, void* tid2eid, void* out_weights,
+    void* out_indices, int batch_size, int n_experts, float route_scale, bool is_hash, cudaStream_t stream)
+{
+    kolibri_gate_forward(scores_in, bias, input_ids, tid2eid, out_weights, out_indices, batch_size, n_experts, route_scale, is_hash, stream);
 }
 
 } // namespace kernels

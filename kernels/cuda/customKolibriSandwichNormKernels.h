@@ -39,6 +39,16 @@ void invokeFusedSandwichResidualNorm(
     int const hidden_dim,
     cudaStream_t stream);
 
+template <typename T>
+void invokeCopyBaseline(
+    T const* in1,
+    T const* in2,
+    T* out1,
+    T* out2,
+    int const tokens,
+    int const hidden_dim,
+    cudaStream_t stream);
+
 } // namespace kernels
 
 TRTLLM_NAMESPACE_END
