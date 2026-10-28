@@ -48,6 +48,11 @@ import torch.nn.functional as F
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FUSIONS = os.path.join(ROOT, "fusions")
+BENCHMARKS = os.path.join(ROOT, "benchmarks")
+if BENCHMARKS not in sys.path:
+    sys.path.insert(0, BENCHMARKS)
+
+from weights_loader import get_kolibri_2block_weights, DEFAULT_CHECKPOINT_PATH
 
 
 def _load(name, rel):
@@ -326,6 +331,17 @@ def main():
         help="Number of warmup iterations",
     )
     p.add_argument(
+        "--use-random-weights",
+        action="store_true",
+        help="Use synthetic random Gaussian weights instead of real HuggingFace weights",
+    )
+    p.add_argument(
+        "--weights-path",
+        type=str,
+        default=DEFAULT_CHECKPOINT_PATH,
+        help="Path to local Kolibri 2-block checkpoint file",
+    )
+    p.add_argument(
         "--nsys",
         action="store_true",
         help="Bracket benchmark iterations with cudaProfilerStart/Stop for Nsight Systems",
@@ -364,10 +380,17 @@ def main():
         getattr(mod, fn)()
     print("[+] All fusion and baseline extension ops successfully loaded.\n")
 
-    print(f"[*] Allocating {args.layers} independent production blocks on {dev}...")
-    torch.cuda.reset_peak_memory_stats(dev)
-    gen = torch.Generator(device=dev).manual_seed(0)
-    layers = [make_layer(gen, dev) for _ in range(args.layers)]
+    if not args.use_random_weights:
+        print("[*] Loading real production weights (Aleph-Alpha/Kolibri-1-BF16)...")
+        layers = get_kolibri_2block_weights(checkpoint_path=args.weights_path, device=dev)
+        if args.layers != 2:
+            print(f"  Note: repeating/slicing loaded 2 blocks to match --layers={args.layers}...")
+            layers = [layers[i % len(layers)] for i in range(args.layers)]
+    else:
+        print(f"[*] Allocating {args.layers} synthetic random production blocks on {dev}...")
+        torch.cuda.reset_peak_memory_stats(dev)
+        gen = torch.Generator(device=dev).manual_seed(0)
+        layers = [make_layer(gen, dev) for _ in range(args.layers)]
 
     seen, wbytes = set(), 0
     for L in layers:
@@ -375,7 +398,7 @@ def main():
             if t.data_ptr() not in seen:
                 seen.add(t.data_ptr())
                 wbytes += t.numel() * t.element_size()
-    print(f"[+] Allocated {wbytes / (1024**3):.2f} GB of independent weights across {args.layers} blocks.\n")
+    print(f"[+] Loaded {wbytes / (1024**3):.2f} GB of independent weights across {args.layers} blocks on {dev}.\n")
 
     variants = ["baseline", "fused"] if args.variant == "both" else [args.variant]
     fusion_regions = ["R1_sandwich_norm", "R2_moe_prologue", "R3_post_moe_norm"]
