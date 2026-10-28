@@ -25,7 +25,9 @@ top-k boundary ties can flip between variants, which changes the expert segment 
 Methodology: baseline and fused iterations are interleaved (alternating order every iteration),
 statistics use the sample std (ddof=1) plus percentiles, and --export-csv additionally writes
 <stem>_raw.csv (every per-iteration sample) and <stem>_meta.json (git commit, versions, GPU clocks).
-For publication numbers, lock GPU clocks first, e.g. `sudo nvidia-smi -lgc <max_sm_clock>`.
+For publication numbers, lock GPU clocks if you can (`sudo nvidia-smi -lgc <max_sm_clock>`); otherwise
+--warmup-seconds brings the GPU to thermal steady state and interleaving keeps paired samples
+(baseline_i, fused_i) at the same clock, so per-pair speedups cancel residual drift.
 
 Usage:
   # Sweep both variants across decode & prefill sequence lengths:
@@ -436,6 +438,13 @@ def main():
         help="Number of warmup iterations",
     )
     p.add_argument(
+        "--warmup-seconds",
+        type=float,
+        default=30.0,
+        help="Sustained load before the sweep so GPU clocks/temperature reach steady state "
+             "(substitute for locked clocks when nvidia-smi -lgc is unavailable)",
+    )
+    p.add_argument(
         "--pin-routing",
         action="store_true",
         help="Run R2 in both variants but feed downstream ops the baseline routing, so expert "
@@ -531,6 +540,28 @@ def main():
     telemetry = []
     if args.pin_routing:
         print("[*] Routing pinned: downstream ops consume baseline prologue outputs in both variants.\n")
+
+    if args.warmup_seconds > 0:
+        import time
+
+        print(f"[*] Thermal warmup: {args.warmup_seconds:.0f}s sustained load at N={max(args.seq_lens)}...")
+        tel0 = gpu_telemetry(dev)
+        xw = torch.randn(max(args.seq_lens), H, device=dev, dtype=DT)
+        Tw = Timer()
+        t_end = time.monotonic() + args.warmup_seconds
+        with torch.inference_mode():
+            while time.monotonic() < t_end:
+                for v in variants:
+                    forward(xw, layers, KERNELS[v], Tw)
+                torch.cuda.synchronize(dev)
+        del xw
+        tel1 = gpu_telemetry(dev)
+        telemetry.append({"n": "thermal_warmup", "before": tel0, "after": tel1})
+        if tel1:
+            print(
+                f"[+] GPU steady state: sm {tel0.get('clocks.sm', '?')}->{tel1['clocks.sm']} MHz "
+                f"(max {tel1['clocks.max.sm']}), temp {tel0.get('temperature.gpu', '?')}->{tel1['temperature.gpu']} C\n"
+            )
 
     for n in args.seq_lens:
         tel_before = gpu_telemetry(dev)
