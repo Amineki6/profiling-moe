@@ -346,6 +346,18 @@ def main():
         action="store_true",
         help="Bracket benchmark iterations with cudaProfilerStart/Stop for Nsight Systems",
     )
+    p.add_argument(
+        "--export-csv",
+        type=str,
+        default=None,
+        help="Optional file path to export benchmark results as CSV",
+    )
+    p.add_argument(
+        "--export-markdown",
+        type=str,
+        default=None,
+        help="Optional file path to export benchmark results as Markdown",
+    )
     args = p.parse_args()
 
     if not torch.cuda.is_available():
@@ -485,25 +497,118 @@ def main():
                 )
                 parity_label = "PASS" if all_layers_matched else "FAIL"
 
-            summary.append((n, fr["baseline"], fr["fused"], res["baseline"][2], res["fused"][2], parity_label, rel))
+            summary.append(
+                dict(
+                    n=n,
+                    r1_base=res["baseline"][3]["R1_sandwich_norm"],
+                    r1_fused=res["fused"][3]["R1_sandwich_norm"],
+                    r2_base=res["baseline"][3]["R2_moe_prologue"],
+                    r2_fused=res["fused"][3]["R2_moe_prologue"],
+                    r3_base=res["baseline"][3]["R3_post_moe_norm"],
+                    r3_fused=res["fused"][3]["R3_post_moe_norm"],
+                    fusion_base=fr["baseline"],
+                    fusion_fused=fr["fused"],
+                    e2e_base=res["baseline"][2],
+                    e2e_fused=res["fused"][2],
+                    parity=parity_label,
+                    rel=rel,
+                )
+            )
         print()
 
     if summary:
-        print("=" * 110)
-        print("  EXECUTIVE SUMMARY: 2-BLOCK FORWARD PASS (TRT-LLM BASELINE vs. FUSED KERNELS)")
+        print("=" * 120)
+        print("  TABLE 1: REGION-BY-REGION SPEEDUP BREAKDOWN (R1, R2, R3)")
+        print("=" * 120)
+        print(
+            f"  {'N':>6} | {'R1 Base':>10} {'R1 Fused':>10} {'R1 X':>8} | "
+            f"{'R2 Base':>10} {'R2 Fused':>10} {'R2 X':>8} | "
+            f"{'R3 Base':>10} {'R3 Fused':>10} {'R3 X':>8} | {'Fusion Total X':>15}"
+        )
+        print("  " + "-" * 116)
+        for row in summary:
+            r1_x = row["r1_base"] / row["r1_fused"] if row["r1_fused"] > 0 else 1.0
+            r2_x = row["r2_base"] / row["r2_fused"] if row["r2_fused"] > 0 else 1.0
+            r3_x = row["r3_base"] / row["r3_fused"] if row["r3_fused"] > 0 else 1.0
+            tot_x = row["fusion_base"] / row["fusion_fused"] if row["fusion_fused"] > 0 else 1.0
+            print(
+                f"  {row['n']:>6} | "
+                f"{row['r1_base']:>7.2f} us {row['r1_fused']:>7.2f} us {r1_x:>7.2f}x | "
+                f"{row['r2_base']:>7.2f} us {row['r2_fused']:>7.2f} us {r2_x:>7.2f}x | "
+                f"{row['r3_base']:>7.2f} us {row['r3_fused']:>7.2f} us {r3_x:>7.2f}x | "
+                f"{tot_x:>14.2f}x"
+            )
+        print("=" * 120)
+
+        print("\n" + "=" * 110)
+        print("  TABLE 2: END-TO-END 2-BLOCK FORWARD PASS (TRT-LLM BASELINE vs. FUSED KERNELS)")
         print("=" * 110)
         print(
-            f"  {'N':>6} | {'Fusion Base':>13} {'Fusion Fused':>14} {'Fusion X':>10} | "
-            f"{'E2E Base':>12} {'E2E Fused':>12} {'Saved (us)':>11} {'E2E X':>8} | {'Parity':>16}"
+            f"  {'N':>6} | {'E2E Base':>12} {'E2E Fused':>12} {'Saved (us)':>11} {'E2E X':>8} | "
+            f"{'Fusion Total X':>15} | {'Parity':>16}"
         )
         print("  " + "-" * 106)
-        for n, fb, ff, eb, ef, parity_label, rel in summary:
-            saved = eb - ef
+        for row in summary:
+            saved = row["e2e_base"] - row["e2e_fused"]
+            e2e_x = row["e2e_base"] / row["e2e_fused"] if row["e2e_fused"] > 0 else 1.0
+            tot_x = row["fusion_base"] / row["fusion_fused"] if row["fusion_fused"] > 0 else 1.0
             print(
-                f"  {n:>6} | {fb:>10.2f} us {ff:>11.2f} us {fb / ff:>9.2f}x | "
-                f"{eb:>9.1f} us {ef:>9.1f} us {saved:>8.1f} us {eb / ef:>7.3f}x | {parity_label:>16}"
+                f"  {row['n']:>6} | {row['e2e_base']:>9.1f} us {row['e2e_fused']:>9.1f} us {saved:>8.1f} us {e2e_x:>7.3f}x | "
+                f"{tot_x:>14.2f}x | {row['parity']:>16}"
             )
         print("=" * 110)
+
+        # Markdown representation for easy copy-pasting
+        md_lines = []
+        md_lines.append("\n### Level 1: Fusion Regions Breakdown (Microbenchmarks)")
+        md_lines.append("| $N$ (Tokens) | R1 Base ($\\mu$s) | R1 Fused ($\\mu$s) | R1 Speedup | R2 Base ($\\mu$s) | R2 Fused ($\\mu$s) | R2 Speedup | R3 Base ($\\mu$s) | R3 Fused ($\\mu$s) | R3 Speedup | Total Fusion Speedup |")
+        md_lines.append("|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
+        for row in summary:
+            r1_x = row["r1_base"] / row["r1_fused"] if row["r1_fused"] > 0 else 1.0
+            r2_x = row["r2_base"] / row["r2_fused"] if row["r2_fused"] > 0 else 1.0
+            r3_x = row["r3_base"] / row["r3_fused"] if row["r3_fused"] > 0 else 1.0
+            tot_x = row["fusion_base"] / row["fusion_fused"] if row["fusion_fused"] > 0 else 1.0
+            md_lines.append(
+                f"| {row['n']} | {row['r1_base']:.2f} | {row['r1_fused']:.2f} | **{r1_x:.2f}x** | "
+                f"{row['r2_base']:.2f} | {row['r2_fused']:.2f} | **{r2_x:.2f}x** | "
+                f"{row['r3_base']:.2f} | {row['r3_fused']:.2f} | **{r3_x:.2f}x** | **{tot_x:.2f}x** |"
+            )
+
+        md_lines.append("\n### Level 2: End-to-End 2-Block Forward Pass")
+        md_lines.append("| $N$ (Tokens) | Baseline E2E ($\\mu$s) | Fused E2E ($\\mu$s) | Saved ($\\mu$s) | E2E Speedup | Fusion Speedup | Parity Status |")
+        md_lines.append("|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
+        for row in summary:
+            saved = row["e2e_base"] - row["e2e_fused"]
+            e2e_x = row["e2e_base"] / row["e2e_fused"] if row["e2e_fused"] > 0 else 1.0
+            tot_x = row["fusion_base"] / row["fusion_fused"] if row["fusion_fused"] > 0 else 1.0
+            md_lines.append(
+                f"| {row['n']} | {row['e2e_base']:.1f} | {row['e2e_fused']:.1f} | {saved:+.1f} | **{e2e_x:.3f}x** | {tot_x:.2f}x | {row['parity']} |"
+            )
+
+        md_content = "\n".join(md_lines)
+        print("\n" + "-" * 80)
+        print("  MARKDOWN EXPORT (Ready to copy into reports / papers):")
+        print("-" * 80)
+        print(md_content)
+
+        if args.export_markdown:
+            os.makedirs(os.path.dirname(os.path.abspath(args.export_markdown)), exist_ok=True)
+            with open(args.export_markdown, "w") as f:
+                f.write(md_content + "\n")
+            print(f"\n[+] Saved Markdown report to: {args.export_markdown}")
+
+        if args.export_csv:
+            os.makedirs(os.path.dirname(os.path.abspath(args.export_csv)), exist_ok=True)
+            import csv
+            with open(args.export_csv, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=[
+                    "n", "r1_base", "r1_fused", "r2_base", "r2_fused", "r3_base", "r3_fused",
+                    "fusion_base", "fusion_fused", "e2e_base", "e2e_fused", "parity", "rel"
+                ])
+                writer.writeheader()
+                for row in summary:
+                    writer.writerow(row)
+            print(f"[+] Saved CSV data to: {args.export_csv}")
 
 
 if __name__ == "__main__":
