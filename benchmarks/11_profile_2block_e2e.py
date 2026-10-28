@@ -18,8 +18,14 @@ The three fusion regions are swapped between variants:
         fused:    fusions/02_post_moe_norm/fused    (fusedAddPostMoeNormRegKernel, 1 launch, 100% in-register)
 
 All other surrounding operations (attention, gate GEMM, expert GEMMs, shared expert, finalize)
-are 100% IDENTICAL PyTorch operations in both variants, ensuring that any delta in execution time
-and memory traffic stems directly from the three kernel fusions.
+are 100% IDENTICAL PyTorch operations in both variants. Note that at large N a handful of
+top-k boundary ties can flip between variants, which changes the expert segment sizes seen by the
+(otherwise identical) expert GEMMs; use --pin-routing to remove that confound.
+
+Methodology: baseline and fused iterations are interleaved (alternating order every iteration),
+statistics use the sample std (ddof=1) plus percentiles, and --export-csv additionally writes
+<stem>_raw.csv (every per-iteration sample) and <stem>_meta.json (git commit, versions, GPU clocks).
+For publication numbers, lock GPU clocks first, e.g. `sudo nvidia-smi -lgc <max_sm_clock>`.
 
 Usage:
   # Sweep both variants across decode & prefill sequence lengths:
@@ -27,6 +33,12 @@ Usage:
 
   # Target a specific GPU:
   python benchmarks/11_profile_2block_e2e.py --device cuda:0
+
+  # Publication run (free routing + pinned-routing control):
+  python benchmarks/11_profile_2block_e2e.py --runs 200 --export-csv results/e2e_benchmark_report.csv \
+      --export-markdown results/e2e_benchmark_report.md
+  python benchmarks/11_profile_2block_e2e.py --runs 200 --pin-routing \
+      --export-csv results/e2e_benchmark_report_pinned.csv --export-markdown results/e2e_benchmark_report_pinned.md
 
   # Nsight Systems profiling:
   nsys profile -t cuda,nvtx,osrt --capture-range=cudaProfilerApi --capture-range-end=stop -f true \
@@ -198,8 +210,13 @@ def experts(permuted, offsets, L):
     return out
 
 
-def decoder_layer(x, residual, L, K, T):
-    """One Kolibri Decoder Layer forward pass with swappable fusion regions."""
+def decoder_layer(x, residual, L, K, T, pin=None, capture=None):
+    """One Kolibri Decoder Layer forward pass with swappable fusion regions.
+
+    pin:     optional cached prologue outputs; R2 still executes (and is timed) but its outputs are
+             replaced, so all downstream ops process exactly the same expert segments in both variants.
+    capture: optional list that receives a clone of this layer's prologue outputs.
+    """
     n = x.shape[0]
 
     # Pre-attention norm
@@ -225,7 +242,12 @@ def decoder_layer(x, residual, L, K, T):
 
     # R2: MoE Prologue (Router Top-6 + Dispatch Mapping + Vectorized Activation Expansion)
     with T.region("R2_moe_prologue"):
-        permuted, weights, sel, offsets, p2u, u2p = K["prologue"](moe_in, logits, L["gate_bias"])
+        prologue_out = K["prologue"](moe_in, logits, L["gate_bias"])
+    if capture is not None:
+        capture.append(tuple(t.clone() if torch.is_tensor(t) else t for t in prologue_out))
+    if pin is not None:
+        prologue_out = pin
+    permuted, weights, sel, offsets, p2u, u2p = prologue_out
 
     # Routed experts GEMMs
     with T.region("expert_gemms"):
@@ -248,77 +270,128 @@ def decoder_layer(x, residual, L, K, T):
     return out, residual, sel
 
 
-def forward(x, layers, K, T):
+def forward(x, layers, K, T, pin=None, capture=None):
     residual, sels = None, []
-    for L in layers:
-        x, residual, sel = decoder_layer(x, residual, L, K, T)
+    for i, L in enumerate(layers):
+        x, residual, sel = decoder_layer(x, residual, L, K, T, pin[i] if pin else None, capture)
         sels.append(sel)
     return x + residual, sels
 
 
-def run(variant, n, layers, args, T, dev):
-    K = KERNELS[variant]
+def stats(arr):
+    """Robust summary of a timing sample (sample std, ddof=1)."""
+    arr = np.asarray(arr, dtype=np.float64)
+    p05, p25, p50, p75, p95 = np.percentile(arr, [5, 25, 50, 75, 95])
+    return {
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0,
+        "median": float(p50),
+        "p05": float(p05),
+        "p25": float(p25),
+        "p75": float(p75),
+        "p95": float(p95),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "count": int(arr.size),
+    }
+
+
+def gpu_telemetry(dev):
+    """Query SM/memory clocks, temperature and power via nvidia-smi (best effort, never fatal)."""
+    import subprocess
+
+    fields = ["clocks.sm", "clocks.max.sm", "clocks.mem", "temperature.gpu", "power.draw"]
+    props = torch.cuda.get_device_properties(dev)
+    gpu_id = f"GPU-{props.uuid}" if getattr(props, "uuid", None) else str(dev.index or 0)
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "-i", gpu_id, f"--query-gpu={','.join(fields)}", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        vals = [v.strip() for v in out.stdout.strip().split(",")]
+        if out.returncode != 0 or len(vals) != len(fields):
+            return {}
+        return dict(zip(fields, vals))
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+
+def run(variants, n, layers, args, dev):
+    """Benchmark all variants at one N with interleaved iterations.
+
+    Iterations alternate the variant order (ABAB.. then BABA..) so clock/thermal drift and
+    ordering effects hit both variants equally instead of biasing whichever runs second.
+    """
     gen = torch.Generator(device=dev).manual_seed(1234 + n)
     x = torch.empty(n, H, device=dev, dtype=DT).normal_(0.0, 1.0, generator=gen)
+    Ts = {v: Timer() for v in variants}
+
+    def order(i):
+        return variants if i % 2 == 0 else variants[::-1]
 
     with torch.inference_mode():
+        # Reference (un-pinned) outputs for the parity check
+        ref = {v: forward(x, layers, KERNELS[v], Ts[v]) for v in variants}
+
+        pin = None
+        if args.pin_routing:
+            capture = []
+            forward(x, layers, KERNELS["baseline"], Ts[variants[0]], capture=capture)
+            pin = capture
+
         # Warmup
-        T.enabled = False
-        for _ in range(args.warmup):
-            forward(x, layers, K, T)
+        for i in range(args.warmup):
+            for v in order(i):
+                forward(x, layers, KERNELS[v], Ts[v], pin)
         torch.cuda.synchronize(dev)
-        T.reset()
+        for T in Ts.values():
+            T.reset()
 
         # Profiler capture (e.g. for Nsight Systems)
         if args.nsys:
             torch.cuda.cudart().cudaProfilerStart()
 
         # (a) Uninstrumented wall-clock e2e timing (0 CUDA-event overhead inside forward)
-        e2e_events = [
-            (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
-            for _ in range(args.runs)
-        ]
+        e2e_events = {
+            v: [(torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) for _ in range(args.runs)]
+            for v in variants
+        }
         for i in range(args.runs):
-            torch.cuda.nvtx.range_push(f"{variant}_N{n}_iter{i}")
-            e2e_events[i][0].record()
-            out, sels = forward(x, layers, K, T)
-            e2e_events[i][1].record()
-            torch.cuda.nvtx.range_pop()
+            for v in order(i):
+                torch.cuda.nvtx.range_push(f"{v}_N{n}_iter{i}")
+                e2e_events[v][i][0].record()
+                forward(x, layers, KERNELS[v], Ts[v], pin)
+                e2e_events[v][i][1].record()
+                torch.cuda.nvtx.range_pop()
         torch.cuda.synchronize(dev)
 
         if args.nsys:
             torch.cuda.cudart().cudaProfilerStop()
 
-        e2e_times = np.array([ev[0].elapsed_time(ev[1]) * 1e3 for ev in e2e_events])
+        e2e_times = {v: np.array([s.elapsed_time(e) * 1e3 for s, e in e2e_events[v]]) for v in variants}
 
         # (b) Per-region breakdown using fine-grained CUDA events
-        T.enabled = True
+        for T in Ts.values():
+            T.enabled = True
         for i in range(args.runs):
-            T.current_iter = i
-            forward(x, layers, K, T)
-        T.flush(dev)
-        T.enabled = False
+            for v in order(i):
+                Ts[v].current_iter = i
+                forward(x, layers, KERNELS[v], Ts[v], pin)
+        for T in Ts.values():
+            T.flush(dev)
+            T.enabled = False
 
-    regions = {}
-    for k in T.totals:
-        arr = np.array(T.iter_records[k]) if T.iter_records[k] else np.array([T.totals[k] / args.runs])
-        regions[k] = {
-            "mean": float(np.mean(arr)),
-            "std": float(np.std(arr)),
-            "median": float(np.median(arr)),
-            "min": float(np.min(arr)),
-            "max": float(np.max(arr)),
+    res = {}
+    for v in variants:
+        T = Ts[v]
+        raw_regions = {
+            k: np.array(T.iter_records[k]) if T.iter_records[k] else np.array([T.totals[k] / args.runs])
+            for k in T.totals
         }
-
-    e2e_stats = {
-        "mean": float(np.mean(e2e_times)),
-        "std": float(np.std(e2e_times)),
-        "median": float(np.median(e2e_times)),
-        "min": float(np.min(e2e_times)),
-        "max": float(np.max(e2e_times)),
-    }
-
-    return out, sels, e2e_stats, regions
+        regions = {k: stats(arr) for k, arr in raw_regions.items()}
+        out, sels = ref[v]
+        res[v] = (out, sels, stats(e2e_times[v]), regions, {"e2e": e2e_times[v], "regions": raw_regions})
+    return res
 
 
 def main():
@@ -353,14 +426,20 @@ def main():
     p.add_argument(
         "--runs",
         type=int,
-        default=20,
-        help="Number of benchmark iterations",
+        default=100,
+        help="Number of benchmark iterations (per variant, interleaved)",
     )
     p.add_argument(
         "--warmup",
         type=int,
-        default=5,
+        default=10,
         help="Number of warmup iterations",
+    )
+    p.add_argument(
+        "--pin-routing",
+        action="store_true",
+        help="Run R2 in both variants but feed downstream ops the baseline routing, so expert "
+             "GEMMs/finalize do identical work (isolates kernel effects from routing tie-flips)",
     )
     p.add_argument(
         "--use-random-weights",
@@ -448,17 +527,35 @@ def main():
     fusion_regions = ["R1_sandwich_norm", "R2_moe_prologue", "R3_post_moe_norm"]
     summary = []
 
+    raw_rows = []
+    telemetry = []
+    if args.pin_routing:
+        print("[*] Routing pinned: downstream ops consume baseline prologue outputs in both variants.\n")
+
     for n in args.seq_lens:
-        res = {}
+        tel_before = gpu_telemetry(dev)
+        res = run(variants, n, layers, args, dev)
+        tel_after = gpu_telemetry(dev)
+        telemetry.append({"n": n, "before": tel_before, "after": tel_after})
+
         for v in variants:
-            T = Timer()
-            res[v] = run(v, n, layers, args, T, dev)
+            for i, t in enumerate(res[v][4]["e2e"]):
+                raw_rows.append((n, v, "e2e", i, float(t)))
+            for r, arr in res[v][4]["regions"].items():
+                for i, t in enumerate(arr):
+                    raw_rows.append((n, v, r, i, float(t)))
 
         print(f"=== N = {n:4d} tokens ({args.layers} blocks) " + "=" * 50)
+        if tel_before:
+            print(
+                f"  gpu: sm {tel_before['clocks.sm']}->{tel_after.get('clocks.sm', '?')} MHz "
+                f"(max {tel_before['clocks.max.sm']}), temp {tel_before['temperature.gpu']}->"
+                f"{tel_after.get('temperature.gpu', '?')} C"
+            )
         names = list(res[variants[0]][3].keys())
         hdr = f"  {'region (sum over 2 layers)':<28}" + "".join(f"{v:>15}" for v in variants)
         if len(variants) == 2:
-            hdr += f"{'speedup':>12}"
+            hdr += f"{'speedup | Δ (median)':>22}"
         print(hdr)
 
         for r in names:
@@ -468,9 +565,12 @@ def main():
                 s = res[v][3][r]["std"]
                 line += f"{m:>8.2f} ± {s:<5.2f} us"
             if len(variants) == 2:
-                b, f = res["baseline"][3][r]["mean"], res["fused"][3][r]["mean"]
+                b, f = res["baseline"][3][r]["median"], res["fused"][3][r]["median"]
                 if r in fusion_regions and f > 0:
                     line += f"{b / f:>10.2f}x"
+                else:
+                    # Should be ~0 for ops that are identical in both variants
+                    line += f"{f - b:>+9.2f}us"
             print(line)
 
         fr_mean = {v: sum(res[v][3][r]["mean"] for r in fusion_regions) for v in variants}
@@ -553,6 +653,9 @@ def main():
                     e2e_fused=res["fused"][2],
                     parity=parity_label,
                     rel=rel,
+                    regions_base=res["baseline"][3],
+                    regions_fused=res["fused"][3],
+                    flips=layer_flips,
                 )
             )
         print()
@@ -667,53 +770,95 @@ def main():
             print(f"\n[+] Saved Markdown report to: {args.export_markdown}")
 
         if args.export_csv:
-            os.makedirs(os.path.dirname(os.path.abspath(args.export_csv)), exist_ok=True)
             import csv
+            import json
+            import subprocess
+
+            os.makedirs(os.path.dirname(os.path.abspath(args.export_csv)), exist_ok=True)
+            short = {"R1_sandwich_norm": "r1", "R2_moe_prologue": "r2", "R3_post_moe_norm": "r3"}
+            stat_keys = [("mean", "mean"), ("std", "std"), ("median", "med"), ("p05", "p05"),
+                         ("p25", "p25"), ("p75", "p75"), ("p95", "p95"), ("min", "min"), ("max", "max")]
+            region_names = list(summary[0]["regions_base"].keys())
+            nonfusion = [r for r in region_names if r not in fusion_regions]
+
+            fieldnames = ["n"]
+            for r in region_names:
+                for vt in ("base", "fused"):
+                    fieldnames += [f"{short.get(r, r)}_{vt}_{sk}" for _, sk in stat_keys]
+            for vt in ("base", "fused"):
+                fieldnames += [f"e2e_{vt}_{sk}" for _, sk in stat_keys]
+            fieldnames += [
+                "fusion_base", "fusion_fused", "fusion_saved",
+                "fusion_base_med", "fusion_fused_med", "fusion_saved_med",
+                "nonfusion_base_med", "nonfusion_fused_med", "nonfusion_delta_med",
+                "e2e_saved_mean", "e2e_saved_med", "e2e_count",
+                "pin_routing", "parity", "rel",
+            ] + [f"flips_l{i + 1}" for i in range(len(summary[0]["flips"]))]
+
             with open(args.export_csv, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=[
-                    "n",
-                    "r1_base_mean", "r1_base_std", "r1_fused_mean", "r1_fused_std",
-                    "r2_base_mean", "r2_base_std", "r2_fused_mean", "r2_fused_std",
-                    "r3_base_mean", "r3_base_std", "r3_fused_mean", "r3_fused_std",
-                    "fusion_base", "fusion_fused", "fusion_saved",
-                    "e2e_base_mean", "e2e_base_std", "e2e_base_med",
-                    "e2e_fused_mean", "e2e_fused_std", "e2e_fused_med",
-                    "e2e_saved_mean", "e2e_saved_med", "parity", "rel"
-                ])
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 for row in summary:
-                    b_m, b_s = row["e2e_base"]["mean"], row["e2e_base"]["std"]
-                    f_m, f_s = row["e2e_fused"]["mean"], row["e2e_fused"]["std"]
-                    b_med, f_med = row["e2e_base"]["median"], row["e2e_fused"]["median"]
-                    writer.writerow({
-                        "n": row["n"],
-                        "r1_base_mean": row["r1_base"]["mean"],
-                        "r1_base_std": row["r1_base"]["std"],
-                        "r1_fused_mean": row["r1_fused"]["mean"],
-                        "r1_fused_std": row["r1_fused"]["std"],
-                        "r2_base_mean": row["r2_base"]["mean"],
-                        "r2_base_std": row["r2_base"]["std"],
-                        "r2_fused_mean": row["r2_fused"]["mean"],
-                        "r2_fused_std": row["r2_fused"]["std"],
-                        "r3_base_mean": row["r3_base"]["mean"],
-                        "r3_base_std": row["r3_base"]["std"],
-                        "r3_fused_mean": row["r3_fused"]["mean"],
-                        "r3_fused_std": row["r3_fused"]["std"],
+                    out = {"n": row["n"]}
+                    for r in region_names:
+                        for vt, regs in (("base", row["regions_base"]), ("fused", row["regions_fused"])):
+                            for k, sk in stat_keys:
+                                out[f"{short.get(r, r)}_{vt}_{sk}"] = regs[r][k]
+                    for vt, e in (("base", row["e2e_base"]), ("fused", row["e2e_fused"])):
+                        for k, sk in stat_keys:
+                            out[f"e2e_{vt}_{sk}"] = e[k]
+                    fb_med = sum(row["regions_base"][r]["median"] for r in fusion_regions)
+                    ff_med = sum(row["regions_fused"][r]["median"] for r in fusion_regions)
+                    nb_med = sum(row["regions_base"][r]["median"] for r in nonfusion)
+                    nf_med = sum(row["regions_fused"][r]["median"] for r in nonfusion)
+                    out.update({
                         "fusion_base": row["fusion_base"],
                         "fusion_fused": row["fusion_fused"],
                         "fusion_saved": row["fusion_base"] - row["fusion_fused"],
-                        "e2e_base_mean": b_m,
-                        "e2e_base_std": b_s,
-                        "e2e_base_med": b_med,
-                        "e2e_fused_mean": f_m,
-                        "e2e_fused_std": f_s,
-                        "e2e_fused_med": f_med,
-                        "e2e_saved_mean": b_m - f_m,
-                        "e2e_saved_med": b_med - f_med,
+                        "fusion_base_med": fb_med,
+                        "fusion_fused_med": ff_med,
+                        "fusion_saved_med": fb_med - ff_med,
+                        "nonfusion_base_med": nb_med,
+                        "nonfusion_fused_med": nf_med,
+                        "nonfusion_delta_med": nf_med - nb_med,
+                        "e2e_saved_mean": row["e2e_base"]["mean"] - row["e2e_fused"]["mean"],
+                        "e2e_saved_med": row["e2e_base"]["median"] - row["e2e_fused"]["median"],
+                        "e2e_count": row["e2e_base"]["count"],
+                        "pin_routing": int(args.pin_routing),
                         "parity": row["parity"],
                         "rel": row["rel"],
                     })
+                    for i, fl in enumerate(row["flips"]):
+                        out[f"flips_l{i + 1}"] = fl
+                    writer.writerow(out)
             print(f"[+] Saved CSV data to: {args.export_csv}")
+
+            # Per-iteration samples (long format) for bootstrap CIs / distribution plots
+            stem = os.path.splitext(args.export_csv)[0]
+            with open(f"{stem}_raw.csv", "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["n", "variant", "region", "iter", "us"])
+                writer.writerows(raw_rows)
+            print(f"[+] Saved raw per-iteration samples to: {stem}_raw.csv")
+
+            def _git(*cmd):
+                try:
+                    return subprocess.run(["git", "-C", ROOT, *cmd], capture_output=True, text=True).stdout.strip()
+                except OSError:
+                    return ""
+
+            meta = {
+                "device": torch.cuda.get_device_name(dev),
+                "torch": torch.__version__,
+                "cuda": torch.version.cuda,
+                "git_commit": _git("rev-parse", "HEAD"),
+                "git_dirty": bool(_git("status", "--porcelain")),
+                "args": vars(args),
+                "telemetry": telemetry,
+            }
+            with open(f"{stem}_meta.json", "w") as f:
+                json.dump(meta, f, indent=2)
+            print(f"[+] Saved run metadata to: {stem}_meta.json")
 
 
 if __name__ == "__main__":
