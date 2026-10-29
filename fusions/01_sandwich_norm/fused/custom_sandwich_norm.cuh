@@ -10,138 +10,49 @@ namespace kolibri
 namespace fusions
 {
 
-// Align to 16-byte boundary for 128-bit LDG.E.128 and STG.E.128 instructions
+// Conversion helpers: scalar T to float
 template <typename T>
-struct alignas(16) Vec128_t;
+__device__ __forceinline__ float to_float(T val);
 
-// Vector specialization for BF16 (8 elements = 16 bytes)
 template <>
-struct alignas(16) Vec128_t<__nv_bfloat16>
+__device__ __forceinline__ float to_float<__nv_bfloat16>(__nv_bfloat16 val)
 {
-    static constexpr int size = 8;
-    __nv_bfloat16 data[8];
+    return __bfloat162float(val);
+}
 
-    __device__ inline float sum_of_squares() const
-    {
-        float s = 0.0f;
-        #pragma unroll
-        for (int k = 0; k < 8; ++k)
-        {
-            float const f = __bfloat162float(data[k]);
-            s += f * f;
-        }
-        return s;
-    }
-
-    __device__ inline Vec128_t<__nv_bfloat16> rmsnorm(float s_var, Vec128_t<__nv_bfloat16> const& gamma) const
-    {
-        Vec128_t<__nv_bfloat16> out;
-        #pragma unroll
-        for (int k = 0; k < 8; ++k)
-        {
-            float const val_f = __bfloat162float(data[k]);
-            float const g_f   = __bfloat162float(gamma.data[k]);
-            out.data[k]       = __float2bfloat16(val_f * s_var * g_f);
-        }
-        return out;
-    }
-
-    __device__ inline Vec128_t<__nv_bfloat16> add(Vec128_t<__nv_bfloat16> const& b) const
-    {
-        Vec128_t<__nv_bfloat16> out;
-        #pragma unroll
-        for (int k = 0; k < 8; ++k)
-        {
-            out.data[k] = __float2bfloat16(__bfloat162float(data[k]) + __bfloat162float(b.data[k]));
-        }
-        return out;
-    }
-};
-
-// Vector specialization for FP16 (8 elements = 16 bytes)
 template <>
-struct alignas(16) Vec128_t<half>
+__device__ __forceinline__ float to_float<half>(half val)
 {
-    static constexpr int size = 8;
-    half data[8];
+    return __half2float(val);
+}
 
-    __device__ inline float sum_of_squares() const
-    {
-        float s = 0.0f;
-        #pragma unroll
-        for (int k = 0; k < 8; ++k)
-        {
-            float const f = __half2float(data[k]);
-            s += f * f;
-        }
-        return s;
-    }
-
-    __device__ inline Vec128_t<half> rmsnorm(float s_var, Vec128_t<half> const& gamma) const
-    {
-        Vec128_t<half> out;
-        #pragma unroll
-        for (int k = 0; k < 8; ++k)
-        {
-            float const val_f = __half2float(data[k]);
-            float const g_f   = __half2float(gamma.data[k]);
-            out.data[k]       = __float2half(val_f * s_var * g_f);
-        }
-        return out;
-    }
-
-    __device__ inline Vec128_t<half> add(Vec128_t<half> const& b) const
-    {
-        Vec128_t<half> out;
-        #pragma unroll
-        for (int k = 0; k < 8; ++k)
-        {
-            out.data[k] = __float2half(__half2float(data[k]) + __half2float(b.data[k]));
-        }
-        return out;
-    }
-};
-
-// Vector specialization for FP32 (4 elements = 16 bytes)
 template <>
-struct alignas(16) Vec128_t<float>
+__device__ __forceinline__ float to_float<float>(float val)
 {
-    static constexpr int size = 4;
-    float data[4];
+    return val;
+}
 
-    __device__ inline float sum_of_squares() const
-    {
-        float s = 0.0f;
-        #pragma unroll
-        for (int k = 0; k < 4; ++k)
-        {
-            s += data[k] * data[k];
-        }
-        return s;
-    }
+// Conversion helpers: float to scalar T
+template <typename T>
+__device__ __forceinline__ T from_float(float val);
 
-    __device__ inline Vec128_t<float> rmsnorm(float s_var, Vec128_t<float> const& gamma) const
-    {
-        Vec128_t<float> out;
-        #pragma unroll
-        for (int k = 0; k < 4; ++k)
-        {
-            out.data[k] = data[k] * s_var * gamma.data[k];
-        }
-        return out;
-    }
+template <>
+__device__ __forceinline__ __nv_bfloat16 from_float<__nv_bfloat16>(float val)
+{
+    return __float2bfloat16(val);
+}
 
-    __device__ inline Vec128_t<float> add(Vec128_t<float> const& b) const
-    {
-        Vec128_t<float> out;
-        #pragma unroll
-        for (int k = 0; k < 4; ++k)
-        {
-            out.data[k] = data[k] + b.data[k];
-        }
-        return out;
-    }
-};
+template <>
+__device__ __forceinline__ half from_float<half>(float val)
+{
+    return __float2half(val);
+}
+
+template <>
+__device__ __forceinline__ float from_float<float>(float val)
+{
+    return val;
+}
 
 // Host launcher function
 template <typename T>

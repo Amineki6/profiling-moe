@@ -32,41 +32,40 @@ __device__ __forceinline__ float blockSumAll(float v, float* red)
 }
 
 // =================================================================================================
-// Production Fused Sandwich Norm Kernel (SM 89 Ada Lovelace Optimized)
+// Production Fused Sandwich Norm Kernel (Scalar In-Register Variant)
 //
-// 1. Hoists all 4 global memory inputs up front (attn_out, residual_in, gamma1, gamma2).
-// 2. 100% In-Register activation preservation (everything stays in ~32 thread registers, 0 B shmem).
+// 1. Hoists all 4 global memory inputs up front into scalar thread registers (attn_out, residual_in, gamma1, gamma2).
+// 2. 100% In-Register activation preservation (everything stays in thread registers, 0 B shmem data caching).
 // 3. Lightweight single-barrier reduction with warp-shuffle + broadcast (red1, red2 arrays).
 // =================================================================================================
 template <typename T, int NUM_WARPS, int ITERS, int HIDDEN_DIM>
 __global__ void __launch_bounds__(NUM_WARPS * 32)
-fusedSandwichNormRegKernel(
-    Vec128_t<T> const* __restrict__ attn_out,
-    Vec128_t<T> const* __restrict__ residual_in,
-    Vec128_t<T> const* __restrict__ gamma1,
-    Vec128_t<T> const* __restrict__ gamma2,
-    Vec128_t<T>* __restrict__ updated_residual_out,
-    Vec128_t<T>* __restrict__ moe_in_out,
+fusedSandwichNormScalarRegKernel(
+    T const* __restrict__ attn_out,
+    T const* __restrict__ residual_in,
+    T const* __restrict__ gamma1,
+    T const* __restrict__ gamma2,
+    T* __restrict__ updated_residual_out,
+    T* __restrict__ moe_in_out,
     float const eps)
 {
-    using V = Vec128_t<T>;
     constexpr int THREADS = NUM_WARPS * 32;
-    constexpr int N_VEC   = THREADS * ITERS;
+    constexpr int N_ELEM  = THREADS * ITERS;
     constexpr float INV_HIDDEN_DIM = 1.0f / float(HIDDEN_DIM);
 
     // Two separate shared buffers eliminate write-after-read hazards
     __shared__ float red1[NUM_WARPS];
     __shared__ float red2[NUM_WARPS];
 
-    size_t const row = size_t(blockIdx.x) * N_VEC;
+    size_t const row = size_t(blockIdx.x) * N_ELEM;
     int const tid = threadIdx.x;
 
-    V a[ITERS];
-    V r[ITERS];
-    V g1[ITERS];
-    V g2[ITERS];
+    T a[ITERS];
+    T r[ITERS];
+    T g1[ITERS];
+    T g2[ITERS];
 
-    // Issue all global loads up front into registers to maximize memory-level parallelism
+    // Issue all scalar global loads up front into registers
     #pragma unroll
     for (int k = 0; k < ITERS; ++k)
     {
@@ -88,7 +87,8 @@ fusedSandwichNormRegKernel(
     #pragma unroll
     for (int k = 0; k < ITERS; ++k)
     {
-        ss += a[k].sum_of_squares();
+        float const f = to_float(a[k]);
+        ss += f * f;
     }
     float const inv1 = rsqrtf(blockSumAll<NUM_WARPS>(ss, red1) * INV_HIDDEN_DIM + eps);
 
@@ -97,9 +97,17 @@ fusedSandwichNormRegKernel(
     #pragma unroll
     for (int k = 0; k < ITERS; ++k)
     {
-        a[k] = a[k].rmsnorm(inv1, g1[k]).add(r[k]);
+        float const a_f = to_float(a[k]);
+        float const g1_f = to_float(g1[k]);
+        float const r_f = to_float(r[k]);
+
+        float const norm1 = a_f * inv1 * g1_f;
+        float const res_val = r_f + norm1;
+
+        a[k] = from_float<T>(res_val);
         updated_residual_out[row + tid + k * THREADS] = a[k];
-        ss += a[k].sum_of_squares();
+
+        ss += res_val * res_val;
     }
     float const inv2 = rsqrtf(blockSumAll<NUM_WARPS>(ss, red2) * INV_HIDDEN_DIM + eps);
 
@@ -107,7 +115,9 @@ fusedSandwichNormRegKernel(
     #pragma unroll
     for (int k = 0; k < ITERS; ++k)
     {
-        moe_in_out[row + tid + k * THREADS] = a[k].rmsnorm(inv2, g2[k]);
+        float const a_f = to_float(a[k]);
+        float const g2_f = to_float(g2[k]);
+        moe_in_out[row + tid + k * THREADS] = from_float<T>(a_f * inv2 * g2_f);
     }
 }
 
@@ -124,32 +134,31 @@ void invokeFusedSandwichNormReg(
     float const eps,
     cudaStream_t stream)
 {
-    using V = Vec128_t<T>;
     constexpr int NUM_WARPS = 5;
-    constexpr int ITERS = 2; // 5 * 32 * 2 = 320 vectors = 2560 elements
+    constexpr int ITERS = 16; // 5 * 32 * 16 = 2560 scalar elements
     constexpr int HIDDEN_DIM = 2560;
 
     if (hidden_dim != HIDDEN_DIM)
     {
-        throw std::runtime_error("Fused sandwich norm reg requires hidden_dim=2560");
+        throw std::runtime_error("Fused sandwich norm scalar reg requires hidden_dim=2560");
     }
 
     dim3 const grid(tokens);
     dim3 const block(NUM_WARPS * 32);
 
-    fusedSandwichNormRegKernel<T, NUM_WARPS, ITERS, HIDDEN_DIM><<<grid, block, 0, stream>>>(
-        reinterpret_cast<V const*>(attn_out),
-        reinterpret_cast<V const*>(residual_in),
-        reinterpret_cast<V const*>(gamma1),
-        reinterpret_cast<V const*>(gamma2),
-        reinterpret_cast<V*>(updated_residual_out),
-        reinterpret_cast<V*>(moe_in_out),
+    fusedSandwichNormScalarRegKernel<T, NUM_WARPS, ITERS, HIDDEN_DIM><<<grid, block, 0, stream>>>(
+        attn_out,
+        residual_in,
+        gamma1,
+        gamma2,
+        updated_residual_out,
+        moe_in_out,
         eps);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
     {
-        throw std::runtime_error(std::string("FusedSandwichNormReg launch failed: ") + cudaGetErrorString(err));
+        throw std::runtime_error(std::string("FusedSandwichNormScalarReg launch failed: ") + cudaGetErrorString(err));
     }
 }
 
