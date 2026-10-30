@@ -11,17 +11,19 @@ Region 2 is the only multi-kernel fusion region in the pipeline, consisting of 3
   - Step 3: 128-bit Vectorized Activation Row Expansion (kolibri_activation_expansion vs trtllm_activation_expansion)
   - Combined: Full MoE Prologue Pipeline (fused_moe_prologue vs trtllm_moe_prologue)
 
-Figures generated:
-  1. fig1_r2_stage_breakdown:
-     (a) Log-log execution latency curves for each sub-stage (Baseline vs Fused).
-     (b) Latency share (%) stacked bar chart, showing how Step 3 expands to 85%+ of R2 at large N.
-  2. fig2_r2_stage_speedup:
+Figures generated, each in a detail and a slide version (see figstyle.py):
+  1. fig1a_r2_stage_latency:
+     Log-log execution latency curves for each sub-stage (Baseline vs Fused).
+  2. fig1b_r2_stage_share:
+     Latency share (%) stacked bars, showing how Step 3 grows to dominate R2 at large N.
+  3. fig2_r2_stage_speedup:
      Speedup curves vs N for Step 1, Step 2, Step 3, and Total R2 with 95% bootstrap CIs.
-  3. fig3_r2_expansion_bandwidth:
-     Step 3 effective memory bandwidth vs RTX 4090 physical peak DRAM bandwidth (1008 GB/s).
+
+Outputs go to assets/r2/detail/ and assets/r2/slide/.
 
 Usage:
   python benchmarks/generate_r2_figures.py
+  python benchmarks/generate_r2_figures.py --mode slide
   python benchmarks/generate_r2_figures.py --runs 50 --recompute
 """
 
@@ -38,7 +40,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import ticker
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 # Add repo roots
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -46,58 +49,39 @@ sys.path.insert(0, str(REPO_ROOT / "fusions" / "03_moe_prologue" / "fused"))
 sys.path.insert(0, str(REPO_ROOT / "fusions" / "03_moe_prologue" / "baseline"))
 sys.path.insert(0, str(REPO_ROOT / "benchmarks"))
 
-from generate_figures import (
-    BG_COLOR,
-    COLOR_AMBER_EDGE,
-    COLOR_AMBER_FILL,
-    COLOR_BERRY_EDGE,
-    COLOR_BERRY_FILL,
-    COLOR_TAUPE_EDGE,
-    COLOR_TAUPE_FILL,
-    COLOR_TEAL_EDGE,
-    COLOR_TEAL_FILL,
-    GRID_COLOR,
-    MUTED_TEXT,
-    SPINE_COLOR,
-    TEXT_COLOR,
+from figstyle import (
+    C_BLUE,
+    C_BLUE_FILL,
+    C_GREEN,
+    C_GREEN_FILL,
+    C_MUTED,
+    C_PARITY,
+    C_RED,
+    C_RED_FILL,
+    C_TOTAL,
+    DETAIL_W,
+    MODES,
+    SLIDE_NS,
+    SLIDE_SIZE,
+    log2_axis,
+    log_yaxis,
+    n_label,
+    resolve_font,
+    save,
+    slide_latency_panels,
+    slide_n_label,
+    slide_speedup_lines,
+    style,
 )
 
 RESULTS_DIR = REPO_ROOT / "results"
 OUT_DIR = REPO_ROOT / "assets" / "r2"
 
-# Color theme for R2 sub-stages
-C_ROUTER_EDGE = COLOR_BERRY_EDGE   # Deep Berry (Step 1 Router)
-C_ROUTER_FILL = COLOR_BERRY_FILL
-C_MAP_EDGE = COLOR_TEAL_EDGE       # Signature Teal (Step 2 Dispatch Map)
-C_MAP_FILL = COLOR_TEAL_FILL
-C_EXP_EDGE = COLOR_AMBER_EDGE      # Warm Amber (Step 3 Activation Expansion)
-C_EXP_FILL = COLOR_AMBER_FILL
-C_TOTAL_EDGE = "#2563eb"           # Royal Blue (Total R2 Pipeline)
-C_TOTAL_FILL = "#dbeafe"
-
-# High-resolution styling
-plt.rcParams.update({
-    "font.size": 8,
-    "axes.labelsize": 8.5,
-    "axes.labelweight": "semibold",
-    "xtick.labelsize": 7.5,
-    "ytick.labelsize": 7.5,
-    "legend.fontsize": 7.5,
-    "axes.linewidth": 0.75,
-    "grid.linewidth": 0.5,
-    "lines.linewidth": 1.4,
-    "lines.markersize": 4.5,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.axisbelow": True,
-    "legend.frameon": False,
-    "pdf.fonttype": 42,
-    "ps.fonttype": 42,
-    "svg.fonttype": "none",
-    "savefig.bbox": "tight",
-    "savefig.pad_inches": 0.04,
-    "savefig.facecolor": BG_COLOR,
-})
+# Color theme for R2 sub-stages (shared palette in figstyle.py)
+C_ROUTER_EDGE, C_ROUTER_FILL = C_RED, C_RED_FILL      # Step 1 Router
+C_MAP_EDGE, C_MAP_FILL = C_BLUE, C_BLUE_FILL          # Step 2 Dispatch Map
+C_EXP_EDGE, C_EXP_FILL = C_GREEN, C_GREEN_FILL        # Step 3 Activation Expansion
+C_TOTAL_EDGE, C_TOTAL_FILL = C_TOTAL, "#CBD5E0"       # Total R2 Pipeline
 
 N_BOOT = 10_000
 RNG = np.random.default_rng(42)
@@ -259,207 +243,128 @@ def paired_speedup_ci(data, n, stage):
 # Plotting Routines
 # =============================================================================
 
-def log2_axis(ax, ns):
-    ax.set_xscale("log", base=2)
-    ax.set_xticks(ns)
-    ax.get_xaxis().set_major_formatter(ticker.ScalarFormatter())
+STAGES = [
+    ("step1_router", "Step 1: Router (top-6)", C_ROUTER_EDGE, C_ROUTER_FILL, "o"),
+    ("step2_dispatch", "Step 2: Dispatch map", C_MAP_EDGE, C_MAP_FILL, "s"),
+    ("step3_expansion", "Step 3: Expansion (128-bit)", C_EXP_EDGE, C_EXP_FILL, "^"),
+]
+TOTAL = ("total_prologue", "Total R2 prologue", C_TOTAL_EDGE, C_TOTAL_FILL, "D")
+SHORT = {"step1_router": "Router", "step2_dispatch": "Map", "step3_expansion": "Expand",
+         "total_prologue": "Total"}
 
 
-def save(fig, stem, args):
-    for fmt in args.formats:
-        out = OUT_DIR / f"{stem}.{fmt}"
-        fig.savefig(out, dpi=args.dpi, format=fmt)
-        print(f"Generated: {out}")
-    plt.close(fig)
+def plot_fig1a_r2_stage_latency(data, ns, args, mode):
+    """Figure 1a: latency of each R2 sub-stage and the total, baseline (dashed) vs fused (solid)."""
+    if mode == "slide":
+        fig = slide_latency_panels(data, [(k, SHORT[k]) for k, *_ in STAGES], paired_speedup_ci)
+        return save(fig, OUT_DIR, mode, "fig1a_r2_stage_latency", args)
 
-
-def plot_fig1_r2_stage_breakdown(data, ns, args):
-    """
-    Figure 1: Two-panel breakdown of R2 Prologue sub-stages:
-      (a) Log-log execution latency curves for Step 1, Step 2, Step 3, and Total.
-      (b) Stage latency share (%) stacked bar chart, showing Step 3 scaling to 85%+ of R2.
-    """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.2, 3.2), dpi=args.dpi)
-
-    # ---------------- Panel (a): Latency Curves ----------------
-    stages = [
-        ("step1_router", "Step 1: Router (Top-6)", C_ROUTER_EDGE, "o"),
-        ("step2_dispatch", "Step 2: Dispatch Map", C_MAP_EDGE, "s"),
-        ("step3_expansion", "Step 3: Expansion (128-bit)", C_EXP_EDGE, "^"),
-        ("total_prologue", "Total R2 Prologue", C_TOTAL_EDGE, "D"),
-    ]
-
-    for stage_key, label, color, marker in stages:
-        base_med = [np.median(data[(n, stage_key)]["baseline"]) for n in ns]
-        fused_med = [np.median(data[(n, stage_key)]["fused"]) for n in ns]
-
-        ax1.plot(ns, base_med, color=color, linestyle="--", alpha=0.65, marker=marker, markersize=3.5, label=f"{label} (Base)" if stage_key == "total_prologue" else None)
-        ax1.plot(ns, fused_med, color=color, linestyle="-", marker=marker, markersize=4.0, label=f"{label} (Fused)" if stage_key == "total_prologue" else label)
-
-    log2_axis(ax1, ns)
-    ax1.set_yscale("log")
-    ax1.set_ylabel("Execution Latency (µs) ↓")
-    ax1.set_xlabel("Tokens per Forward Pass, $N$")
-    ax1.set_title("(a) Sub-Stage Latency vs. Sequence Length", loc="left", fontweight="bold")
-    ax1.grid(True, which="both", linestyle=":", alpha=0.4)
-
-    # Callouts
-    ax1.axvline(x=512, color="#64748b", linestyle=":", linewidth=1.1, zorder=1)
-    ax1.text(512, 1.8, "Tipping Point\n$N = 512$", fontsize=6.5, color="#475569", ha="center", va="bottom",
-             bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="#cbd5e1", alpha=0.9))
-
-    ax1.text(4096, 175, "Step 3 Memory Wall\n(125.8 MB DRAM write)", fontsize=6.5, color=C_EXP_EDGE, ha="right", va="bottom",
-             bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="#cbd5e1", alpha=0.9))
-
-    ax1.legend(loc="upper left", fontsize=6.5)
-
-    # ---------------- Panel (b): Stacked Bar Latency Share (%) ----------------
-    bar_ns = [1, 16, 64, 256, 512, 1024, 4096]
-    x_pos = np.arange(len(bar_ns))
-    width = 0.36
-
-    for i, n in enumerate(bar_ns):
-        # Baseline components
-        r_b = np.median(data[(n, "step1_router")]["baseline"])
-        m_b = np.median(data[(n, "step2_dispatch")]["baseline"])
-        e_b = np.median(data[(n, "step3_expansion")]["baseline"])
-        tot_b = r_b + m_b + e_b
-
-        # Fused components
-        r_f = np.median(data[(n, "step1_router")]["fused"])
-        m_f = np.median(data[(n, "step2_dispatch")]["fused"])
-        e_f = np.median(data[(n, "step3_expansion")]["fused"])
-        tot_f = r_f + m_f + e_f
-
-        # Normalized to 100%
-        pct_r_b, pct_m_b, pct_e_b = r_b / tot_b * 100, m_b / tot_b * 100, e_b / tot_b * 100
-        pct_r_f, pct_m_f, pct_e_f = r_f / tot_f * 100, m_f / tot_f * 100, e_f / tot_f * 100
-
-        # Draw Baseline Bar (left)
-        p_base = x_pos[i] - width / 2
-        ax2.bar(p_base, pct_r_b, width, bottom=0, color=C_ROUTER_FILL, edgecolor=C_ROUTER_EDGE, linewidth=0.6, hatch="//")
-        ax2.bar(p_base, pct_m_b, width, bottom=pct_r_b, color=C_MAP_FILL, edgecolor=C_MAP_EDGE, linewidth=0.6, hatch="//")
-        ax2.bar(p_base, pct_e_b, width, bottom=pct_r_b + pct_m_b, color=C_EXP_FILL, edgecolor=C_EXP_EDGE, linewidth=0.6, hatch="//")
-
-        # Draw Fused Bar (right)
-        p_fused = x_pos[i] + width / 2
-        ax2.bar(p_fused, pct_r_f, width, bottom=0, color=C_ROUTER_FILL, edgecolor=C_ROUTER_EDGE, linewidth=0.6)
-        ax2.bar(p_fused, pct_m_f, width, bottom=pct_r_f, color=C_MAP_FILL, edgecolor=C_MAP_EDGE, linewidth=0.6)
-        ax2.bar(p_fused, pct_e_f, width, bottom=pct_r_f + pct_m_f, color=C_EXP_FILL, edgecolor=C_EXP_EDGE, linewidth=0.6)
-
-    ax2.set_xticks(x_pos)
-    ax2.set_xticklabels([str(n) for n in bar_ns])
-    ax2.set_xlabel("Tokens per Forward Pass, $N$ (Left: Base //, Right: Fused)")
-    ax2.set_ylabel("Latency Share within R2 (%)")
-    ax2.set_ylim(0, 100)
-    ax2.set_title("(b) Stage Composition: Decode vs. Prefill", loc="left", fontweight="bold")
-    ax2.grid(True, axis="y", linestyle=":", alpha=0.4)
-
-    # Custom legend for bars
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor=C_ROUTER_FILL, edgecolor=C_ROUTER_EDGE, label="Step 1: Router"),
-        Patch(facecolor=C_MAP_FILL, edgecolor=C_MAP_EDGE, label="Step 2: Dispatch Map"),
-        Patch(facecolor=C_EXP_FILL, edgecolor=C_EXP_EDGE, label="Step 3: Expansion"),
-    ]
-    ax2.legend(handles=legend_elements, loc="upper left", fontsize=7.0)
-
-    fig.tight_layout()
-    save(fig, "fig1_r2_stage_breakdown", args)
-
-
-def plot_fig2_r2_stage_speedup(data, ns, args):
-    """
-    Figure 2: Sub-stage Speedup Curves across N with 95% bootstrap confidence intervals.
-    """
-    fig, ax = plt.subplots(figsize=(3.8, 2.9), dpi=args.dpi)
-
-    stages = [
-        ("step1_router", "Step 1: Router Reduction", C_ROUTER_EDGE, "o"),
-        ("step2_dispatch", "Step 2: Dispatch Mapping", C_MAP_EDGE, "s"),
-        ("step3_expansion", "Step 3: Vectorized Expansion", C_EXP_EDGE, "^"),
-        ("total_prologue", "Total R2 Prologue", C_TOTAL_EDGE, "D"),
-    ]
-
-    for stage_key, label, color, marker in stages:
-        meds, los, his = [], [], []
-        for n in ns:
-            m, l, h = paired_speedup_ci(data, n, stage_key)
-            meds.append(m)
-            los.append(l)
-            his.append(h)
-
-        meds, los, his = np.array(meds), np.array(los), np.array(his)
-        ax.plot(ns, meds, color=color, marker=marker, markersize=4.0, label=label, zorder=4)
-        ax.fill_between(ns, los, his, color=color, alpha=0.15, zorder=3)
+    fig, ax = plt.subplots(figsize=(DETAIL_W, 3.4))
+    for key, _label, edge, _fill, mk in STAGES + [TOTAL]:
+        total = key == TOTAL[0]
+        lw, ms = (2.2, 5) if total else (1.3, 4)
+        base = [np.median(data[(n, key)]["baseline"]) for n in ns]
+        fused = [np.median(data[(n, key)]["fused"]) for n in ns]
+        ax.plot(ns, base, color=edge, ls="--", lw=lw, marker=mk, ms=ms, mfc="white", mew=1.0,
+                alpha=0.7, zorder=4 if total else 3)
+        ax.plot(ns, fused, color=edge, ls="-", lw=lw, marker=mk, ms=ms, zorder=5 if total else 3)
 
     log2_axis(ax, ns)
-    ax.axhline(1.0, color="#64748b", linestyle="--", linewidth=0.8, zorder=1)
-    ax.set_ylim(0.9, 3.0)
+    ax.set_yscale("log")
+    log_yaxis(ax)
+    ax.set_ylabel("Execution latency ($\\mu$s) ↓")
+    ax.set_xlabel("Tokens per forward pass, N")
+
+    handles = [Line2D([], [], color=e, marker=m, lw=2.2 if k == TOTAL[0] else 1.3, label=l)
+               for k, l, e, _f, m in STAGES + [TOTAL]]
+    handles += [Line2D([], [], color=C_MUTED, ls="--", label="TRT-LLM baseline"),
+                Line2D([], [], color=C_MUTED, ls="-", label="Fused (ours)")]
+    ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=3, columnspacing=1.2)
+    save(fig, OUT_DIR, mode, "fig1a_r2_stage_latency", args)
+
+
+def plot_fig1b_r2_stage_share(data, ns, args, mode):
+    """Figure 1b: share of each sub-stage in R2 latency (baseline plain, fused hatched)."""
+    if mode == "slide":
+        return _fig1b_slide(data, args)
+
+    fig, ax = plt.subplots(figsize=(DETAIL_W, 3.0))
+    x = np.arange(len(ns)) * 1.25
+    w, gap = 0.34, 0.05
+
+    for v, off, hatch in (("baseline", -(w + gap) / 2, None), ("fused", (w + gap) / 2, "////")):
+        parts = np.array([[np.median(data[(n, k)][v]) for k, *_ in STAGES] for n in ns])
+        pct = 100 * parts / parts.sum(axis=1, keepdims=True)
+        bottom = np.zeros(len(ns))
+        for j, (_k, _l, edge, fill, _m) in enumerate(STAGES):
+            ax.bar(x + off, pct[:, j], w, bottom=bottom, color=fill, edgecolor=edge,
+                   hatch=hatch, linewidth=0.6, zorder=3)
+            bottom += pct[:, j]
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([n_label(n) for n in ns])
+    ax.set_xlabel("Tokens per forward pass, N")
+    ax.set_ylabel("Latency share within R2 (%)")
+    ax.set_ylim(0, 100)
+
+    handles = [Patch(facecolor=f, edgecolor=e, lw=0.6, label=l) for _k, l, e, f, _m in STAGES]
+    handles += [Patch(facecolor="white", edgecolor=C_MUTED, hatch="////", lw=0.6, label="Fused variant")]
+    ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=2, columnspacing=1.2)
+    save(fig, OUT_DIR, mode, "fig1b_r2_stage_share", args)
+
+
+def _fig1b_slide(data, args):
+    """Slide: where baseline R2 time goes at decode / mid / prefill (shares printed in the bars)."""
+    fig, ax = plt.subplots(figsize=SLIDE_SIZE)
+    y = np.arange(len(SLIDE_NS))[::-1]
+    parts = np.array([[np.median(data[(n, k)]["baseline"]) for k, *_ in STAGES] for n in SLIDE_NS])
+    pct = 100 * parts / parts.sum(axis=1, keepdims=True)
+    left = np.zeros(len(SLIDE_NS))
+    for j, (key, _label, edge, fill, _m) in enumerate(STAGES):
+        ax.barh(y, pct[:, j], 0.62, left=left, color=fill, edgecolor=edge, lw=1.0, label=SHORT[key])
+        for yi, l, v in zip(y, left, pct[:, j]):
+            if v >= 8:
+                ax.text(l + v / 2, yi, f"{v:.0f}%", ha="center", va="center", fontweight="bold",
+                        color=edge)
+        left += pct[:, j]
+    ax.set_yticks(y)
+    ax.set_yticklabels([slide_n_label(n).replace("\n", "  ") for n in SLIDE_NS])
+    ax.tick_params(axis="y", length=0)
+    ax.set_xlim(0, 100)
+    ax.set_xticks([0, 25, 50, 75, 100])
+    ax.set_xlabel("Share of baseline R2 time (%)")
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=3)
+    save(fig, OUT_DIR, "slide", "fig1b_r2_stage_share", args)
+
+
+def plot_fig2_r2_stage_speedup(data, ns, args, mode):
+    """Figure 2: paired sub-stage speedup (median, 95% bootstrap CI); total emphasised."""
+    if mode == "slide":
+        fig = slide_speedup_lines(data, [(k, SHORT[k], e) for k, _l, e, _f, _m in STAGES],
+                                  (TOTAL[0], "Total R2"), paired_speedup_ci)
+        return save(fig, OUT_DIR, mode, "fig2_r2_stage_speedup", args)
+
+    fig, ax = plt.subplots(figsize=(DETAIL_W, 3.0))
+    lows = []
+    for key, label, edge, _fill, mk in STAGES + [TOTAL]:
+        total = key == TOTAL[0]
+        s = np.array([paired_speedup_ci(data, n, key) for n in ns])
+        lows.append(s[:, 1].min())
+        ax.fill_between(ns, s[:, 1], s[:, 2], color=edge, alpha=0.18 if total else 0.07, lw=0,
+                        zorder=4 if total else 2)
+        if total:
+            ax.plot(ns, s[:, 0], color=edge, marker=mk, lw=2.2, ms=5, label=label, zorder=5)
+        else:
+            ax.plot(ns, s[:, 0], color=edge, marker=mk, lw=1.0, ms=3.5, alpha=0.45, label=label, zorder=3)
+
+    log2_axis(ax, ns)
+    ax.axhline(1.0, color=C_PARITY, lw=1.0, ls=":", zorder=1)
+    ax.set_ylim(min(0.9, min(lows) - 0.05), None)
     ax.yaxis.set_major_formatter(lambda y, _: f"{y:.2f}×")
-    ax.set_xlabel("Tokens per Forward Pass, $N$")
-    ax.set_ylabel("Speedup over Baseline ↑")
-    ax.set_title("Region 2 Sub-Stage Speedup vs. $N$", loc="left", fontweight="bold")
-    ax.grid(True, which="both", linestyle=":", alpha=0.4)
-
-    # Annotations
-    ax.text(64, 2.35, "Router ~2.3×", fontsize=7.0, color=C_ROUTER_EDGE, fontweight="bold")
-    ax.text(4096, 2.65, "Dispatch Map 2.65×", fontsize=7.0, color=C_MAP_EDGE, fontweight="bold", ha="right")
-    ax.text(4096, 1.12, "Expansion (DRAM Bound)", fontsize=7.0, color=C_EXP_EDGE, fontweight="bold", ha="right")
-
-    ax.legend(loc="upper left", bbox_to_anchor=(0.02, 0.98), fontsize=6.8)
-    fig.tight_layout()
-    save(fig, "fig2_r2_stage_speedup", args)
-
-
-def plot_fig3_r2_expansion_bandwidth(data, ns, args):
-    """
-    Figure 3: Effective Memory Bandwidth of Step 3 (Activation Expansion) vs. Peak DRAM Bandwidth.
-    Demonstrates that Step 3 achieves >800 GB/s (>80% of peak physical hardware limits).
-    """
-    fig, ax = plt.subplots(figsize=(3.8, 2.9), dpi=args.dpi)
-
-    H = 2560
-    K = 6
-    peak_dram_gb_s = 1008.0  # NVIDIA GeForce RTX 4090 peak DRAM bandwidth
-
-    # Memory traffic per forward pass for Step 3:
-    # Read: N tokens * H elements * 2 bytes = 5120 * N bytes
-    # Write: N tokens * K experts * H elements * 2 bytes = 30720 * N bytes
-    # Total physical memory traffic: 35,840 * N bytes
-    gb_s_base = []
-    gb_s_fused = []
-
-    for n in ns:
-        bytes_transferred = n * (1 + K) * H * 2  # Total read + write bytes
-        lat_base_s = np.median(data[(n, "step3_expansion")]["baseline"]) * 1e-6
-        lat_fused_s = np.median(data[(n, "step3_expansion")]["fused"]) * 1e-6
-
-        gb_s_base.append((bytes_transferred / 1e9) / lat_base_s)
-        gb_s_fused.append((bytes_transferred / 1e9) / lat_fused_s)
-
-    ax.axhline(peak_dram_gb_s, color="#ef4444", linestyle="--", linewidth=1.1, label="RTX 4090 Peak DRAM Bandwidth (1,008 GB/s)", zorder=2)
-    ax.axhspan(peak_dram_gb_s * 0.80, peak_dram_gb_s, color="#fef2f2", alpha=0.8, label="DRAM Saturation Zone (>80% Peak)", zorder=1)
-
-    ax.plot(ns, gb_s_fused, color=C_EXP_EDGE, marker="o", markersize=4.5, label="128-bit Vectorized Expansion (Fused)", zorder=4)
-    ax.plot(ns, gb_s_base, color=COLOR_TAUPE_EDGE, marker="^", linestyle="--", markersize=4.0, label="TRT-LLM Gather Baseline", zorder=3)
-
-    log2_axis(ax, ns)
-    ax.set_ylim(0, 1100)
-    ax.set_xlabel("Tokens per Forward Pass, $N$")
-    ax.set_ylabel("Effective Memory Bandwidth (GB/s) ↑")
-    ax.set_title("Step 3: Activation Expansion Memory Bandwidth", loc="left", fontweight="bold")
-    ax.grid(True, which="both", linestyle=":", alpha=0.4)
-
-    # Highlight N=4096 saturation
-    bw_4096 = gb_s_fused[-1]
-    pct = (bw_4096 / peak_dram_gb_s) * 100
-    ax.text(4096, bw_4096 - 60, f"{bw_4096:.0f} GB/s\n({pct:.1f}% of Peak)", fontsize=7.0, color=C_EXP_EDGE, fontweight="bold", ha="right",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="#cbd5e1", alpha=0.9))
-
-    ax.legend(loc="lower right", fontsize=6.5)
-    fig.tight_layout()
-    save(fig, "fig3_r2_expansion_bandwidth", args)
+    ax.set_xlabel("Tokens per forward pass, N")
+    ax.set_ylabel("Speedup over baseline ↑")
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=2, columnspacing=1.2)
+    save(fig, OUT_DIR, mode, "fig2_r2_stage_speedup", args)
 
 
 # =============================================================================
@@ -472,18 +377,22 @@ def main():
     p.add_argument("--warmup", type=int, default=10, help="Warmup iterations")
     p.add_argument("--device", type=str, default="cuda:0", help="CUDA device")
     p.add_argument("--recompute", action="store_true", help="Force re-running GPU benchmark instead of loading cached CSV")
+    p.add_argument("--mode", choices=[*MODES, "both"], default="both")
     p.add_argument("--formats", nargs="+", default=["pdf", "png"])
     p.add_argument("--dpi", type=int, default=600)
     args = p.parse_args()
 
+    resolve_font()
     data, ns = load_or_compute_data(args)
 
     print("=" * 80)
     print("Generating Region 2 sub-stage publication figures...")
     print("=" * 80)
-    plot_fig1_r2_stage_breakdown(data, ns, args)
-    plot_fig2_r2_stage_speedup(data, ns, args)
-    plot_fig3_r2_expansion_bandwidth(data, ns, args)
+    for mode in MODES if args.mode == "both" else [args.mode]:
+        with style(mode):
+            plot_fig1a_r2_stage_latency(data, ns, args, mode)
+            plot_fig1b_r2_stage_share(data, ns, args, mode)
+            plot_fig2_r2_stage_speedup(data, ns, args, mode)
     print("\n[+] All Region 2 figures successfully generated in: assets/r2/")
 
 
