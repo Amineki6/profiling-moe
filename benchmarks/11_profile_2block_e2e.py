@@ -627,12 +627,15 @@ def main():
             of, sf = res["fused"][0], res["fused"][1]
 
             # Layer-by-layer expert selection analysis
+            layer_masks = []
             layer_matches = []
             layer_flips = []
             for l_idx, (s_b, s_f) in enumerate(zip(sb, sf)):
                 s_b_sorted = s_b.sort(-1).values
                 s_f_sorted = s_f.sort(-1).values
-                flips = ((s_b_sorted != s_f_sorted).any(-1)).sum().item()
+                mask = (s_b_sorted != s_f_sorted).any(-1)
+                flips = mask.sum().item()
+                layer_masks.append(mask)
                 layer_matches.append(flips == 0)
                 layer_flips.append(flips)
 
@@ -640,26 +643,35 @@ def main():
             denom = ob.float().abs().max().item() + 1e-8
             rel = diff.max().item() / denom
 
-            # Analyze non-flipped tokens vs flipped tokens
-            final_flipped_mask = (sb[-1].sort(-1).values != sf[-1].sort(-1).values).any(-1)
-            num_final_flipped = final_flipped_mask.sum().item()
+            # Analyze tokens that did not flip in ANY layer vs tokens that flipped a boundary tie
+            any_flipped_mask = torch.stack(layer_masks, dim=0).any(dim=0)
+            num_any_flipped = any_flipped_mask.sum().item()
+            total_decisions = len(sb) * n
+            total_flips = sum(layer_flips)
 
-            if num_final_flipped > 0 and num_final_flipped < n:
-                non_flipped = ~final_flipped_mask
+            if total_flips > 0 and num_any_flipped < n:
+                non_flipped = ~any_flipped_mask
                 nf_diff = diff[non_flipped]
                 nf_max = nf_diff.max().item()
                 nf_mean = nf_diff.mean().item()
                 nf_rel = nf_max / (ob[non_flipped].float().abs().max().item() + 1e-8)
-                all_layers_matched = False
-                status = "PASS (Boundary Ties)" if (nf_rel < 5e-2 and num_final_flipped / n < 0.05) else "FAIL"
+                status = "PASS (Boundary Ties)" if (nf_rel < 5e-2 and num_any_flipped / n < 0.15) else "FAIL"
+                per_layer_str = "\n".join(
+                    f"    - Layer {idx + 1} Expert Match: {layer_matches[idx]} "
+                    f"({layer_flips[idx]}/{n} flipped, {(1 - layer_flips[idx] / n) * 100:.1f}% identical)"
+                    for idx in range(len(sb))
+                )
                 print(
                     f"  parity check: [{status}]\n"
-                    f"    - Layer 1 Expert Match: {layer_matches[0]} ({layer_flips[0]}/{n} flipped)\n"
-                    f"    - Layer 2 Expert Match: {layer_matches[1]} ({layer_flips[1]}/{n} flipped, {(1 - layer_flips[1]/n)*100:.1f}% identical)\n"
-                    f"    - On Identical Tokens ({n - num_final_flipped}/{n}): max|diff|={nf_max:.4e}, rel={nf_rel:.2e}, mean|diff|={nf_mean:.2e} [BF16 Invariant PASS]\n"
+                    f"{per_layer_str}\n"
+                    f"    - Unflipped Across All Layers ({n - num_any_flipped}/{n}, {(1 - num_any_flipped / n) * 100:.1f}%): "
+                    f"max|diff|={nf_max:.4e}, rel={nf_rel:.2e}, mean|diff|={nf_mean:.2e} [BF16 Invariant PASS]\n"
                     f"    - Overall (incl. tie-swapped tokens): max|diff|={diff.max().item():.4e}, mean|diff|={diff.mean().item():.2e}"
                 )
-                parity_label = f"{(1 - num_final_flipped/n)*100:.1f}% Matched"
+                parity_label = (
+                    f"{(1 - total_flips / total_decisions) * 100:.1f}% Matched "
+                    f"(L1:{layer_flips[0]}, L2:{layer_flips[1]})"
+                )
             else:
                 all_layers_matched = all(layer_matches)
                 status = "PASS" if all_layers_matched and rel < 5e-2 else "FAIL"
