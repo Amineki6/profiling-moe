@@ -167,7 +167,7 @@ def fig1_region_latency(data, ns, args, mode):
     for ax, (key, label, *_rest) in zip(axes, REGIONS):
         for variant, name, colour, ls, mk in (
             ("baseline", "TRT-LLM baseline", C_BASE, "--", "^"),
-            ("fused", "Fused (ours)", C_FUSED, "-", "s"),
+            ("fused", "Fused (mine)", C_FUSED, "-", "s"),
         ):
             q = np.array([quartiles(data[(n, key)][variant]) for n in ns])
             ax.fill_between(ns, q[:, 0], q[:, 2], color=colour, alpha=0.2, lw=0, zorder=2)
