@@ -2,7 +2,7 @@
   "device": "NVIDIA GeForce RTX 4090",
   "torch": "2.14.0+cu130",
   "cuda": "13.0",
-  "git_commit": "c0d1ec3432f287838e45694c545145b8f9b9b5f0",
+  "git_commit": "e7fa3c791285c8b93d2a4d881e6043f46c7bfca1",
   "git_dirty": true,
   "args": {
     "device": "cuda:0",
@@ -24,25 +24,25 @@
     "use_random_weights": false,
     "weights_path": "/home/mkina/profiling/profiling-moe/checkpoints/kolibri_2blocks_real.pt",
     "nsys": false,
-    "export_csv": "results/e2e_benchmark_report.csv",
-    "export_markdown": "results/e2e_benchmark_report.md"
+    "export_csv": "profiling-moe/results/e2e_benchmark_report.csv",
+    "export_markdown": "profiling-moe/results/e2e_benchmark_report.md"
   },
   "telemetry": [
     {
       "n": "thermal_warmup",
       "before": {
-        "clocks.sm": "2565",
+        "clocks.sm": "2745",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "36",
-        "power.draw": "60.58"
+        "temperature.gpu": "44",
+        "power.draw": "64.39"
       },
       "after": {
         "clocks.sm": "2700",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "70",
-        "power.draw": "427.19"
+        "temperature.gpu": "75",
+        "power.draw": "447.21"
       }
     },
     {
@@ -51,117 +51,117 @@
         "clocks.sm": "2700",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "70",
-        "power.draw": "419.04"
+        "temperature.gpu": "75",
+        "power.draw": "438.60"
       },
       "after": {
-        "clocks.sm": "2700",
+        "clocks.sm": "2715",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
         "temperature.gpu": "60",
-        "power.draw": "313.65"
+        "power.draw": "338.08"
       }
     },
     {
       "n": 16,
       "before": {
-        "clocks.sm": "2700",
+        "clocks.sm": "2715",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "60",
-        "power.draw": "283.18"
+        "temperature.gpu": "58",
+        "power.draw": "308.01"
       },
       "after": {
-        "clocks.sm": "2565",
+        "clocks.sm": "2715",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "54",
-        "power.draw": "137.51"
+        "temperature.gpu": "59",
+        "power.draw": "163.84"
       }
     },
     {
       "n": 64,
       "before": {
-        "clocks.sm": "2565",
+        "clocks.sm": "2715",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "54",
-        "power.draw": "137.51"
+        "temperature.gpu": "59",
+        "power.draw": "163.84"
       },
       "after": {
-        "clocks.sm": "2565",
+        "clocks.sm": "2715",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "54",
-        "power.draw": "161.88"
+        "temperature.gpu": "59",
+        "power.draw": "187.28"
       }
     },
     {
       "n": 256,
       "before": {
-        "clocks.sm": "2565",
+        "clocks.sm": "2715",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "54",
-        "power.draw": "161.88"
+        "temperature.gpu": "59",
+        "power.draw": "182.54"
       },
       "after": {
-        "clocks.sm": "2595",
+        "clocks.sm": "2715",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "58",
-        "power.draw": "216.25"
+        "temperature.gpu": "63",
+        "power.draw": "243.20"
       }
     },
     {
       "n": 512,
       "before": {
-        "clocks.sm": "2595",
+        "clocks.sm": "2715",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "58",
-        "power.draw": "215.33"
-      },
-      "after": {
-        "clocks.sm": "2640",
-        "clocks.max.sm": "3105",
-        "clocks.mem": "10251",
-        "temperature.gpu": "62",
-        "power.draw": "299.38"
-      }
-    },
-    {
-      "n": 1024,
-      "before": {
-        "clocks.sm": "2640",
-        "clocks.max.sm": "3105",
-        "clocks.mem": "10251",
-        "temperature.gpu": "62",
-        "power.draw": "307.54"
-      },
-      "after": {
-        "clocks.sm": "2565",
-        "clocks.max.sm": "3105",
-        "clocks.mem": "10251",
-        "temperature.gpu": "65",
-        "power.draw": "352.59"
-      }
-    },
-    {
-      "n": 4096,
-      "before": {
-        "clocks.sm": "2565",
-        "clocks.max.sm": "3105",
-        "clocks.mem": "10251",
-        "temperature.gpu": "65",
-        "power.draw": "340.59"
+        "temperature.gpu": "63",
+        "power.draw": "243.20"
       },
       "after": {
         "clocks.sm": "2700",
         "clocks.max.sm": "3105",
         "clocks.mem": "10251",
-        "temperature.gpu": "72",
-        "power.draw": "425.47"
+        "temperature.gpu": "68",
+        "power.draw": "333.11"
+      }
+    },
+    {
+      "n": 1024,
+      "before": {
+        "clocks.sm": "2700",
+        "clocks.max.sm": "3105",
+        "clocks.mem": "10251",
+        "temperature.gpu": "68",
+        "power.draw": "333.11"
+      },
+      "after": {
+        "clocks.sm": "2700",
+        "clocks.max.sm": "3105",
+        "clocks.mem": "10251",
+        "temperature.gpu": "70",
+        "power.draw": "370.97"
+      }
+    },
+    {
+      "n": 4096,
+      "before": {
+        "clocks.sm": "2700",
+        "clocks.max.sm": "3105",
+        "clocks.mem": "10251",
+        "temperature.gpu": "70",
+        "power.draw": "370.97"
+      },
+      "after": {
+        "clocks.sm": "2700",
+        "clocks.max.sm": "3105",
+        "clocks.mem": "10251",
+        "temperature.gpu": "76",
+        "power.draw": "446.84"
       }
     }
   ]
