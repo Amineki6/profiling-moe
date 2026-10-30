@@ -31,13 +31,6 @@ __device__ __forceinline__ float blockSumAll(float v, float* red)
     return t; // valid across every thread in the CTA
 }
 
-// =================================================================================================
-// Production Fused Sandwich Norm Kernel (Scalar In-Register Variant)
-//
-// 1. Hoists all 4 global memory inputs up front into scalar thread registers (attn_out, residual_in, gamma1, gamma2).
-// 2. 100% In-Register activation preservation (everything stays in thread registers, 0 B shmem data caching).
-// 3. Lightweight single-barrier reduction with warp-shuffle + broadcast (red1, red2 arrays).
-// =================================================================================================
 template <typename T, int NUM_WARPS, int ITERS, int HIDDEN_DIM>
 __global__ void __launch_bounds__(NUM_WARPS * 32)
 fusedSandwichNormScalarRegKernel(
@@ -53,7 +46,6 @@ fusedSandwichNormScalarRegKernel(
     constexpr int N_ELEM  = THREADS * ITERS;
     constexpr float INV_HIDDEN_DIM = 1.0f / float(HIDDEN_DIM);
 
-    // Two separate shared buffers eliminate write-after-read hazards
     __shared__ float red1[NUM_WARPS];
     __shared__ float red2[NUM_WARPS];
 
@@ -61,28 +53,17 @@ fusedSandwichNormScalarRegKernel(
     int const tid = threadIdx.x;
 
     T a[ITERS];
-    T r[ITERS];
     T g1[ITERS];
-    T g2[ITERS];
 
-    // Issue all scalar global loads up front into registers
     #pragma unroll
     for (int k = 0; k < ITERS; ++k)
     {
         int const i = tid + k * THREADS;
         a[k] = attn_out[row + i];
-        r[k] = residual_in[row + i];
-    }
-
-    #pragma unroll
-    for (int k = 0; k < ITERS; ++k)
-    {
-        int const i = tid + k * THREADS;
         g1[k] = gamma1[i];
-        g2[k] = gamma2[i];
     }
 
-    // 1. Compute first RMSNorm variance (Post-Attention Sandwich Norm)
+    // Compute first RMSNorm variance (Post-Attention Sandwich Norm)
     float ss = 0.f;
     #pragma unroll
     for (int k = 0; k < ITERS; ++k)
@@ -90,9 +71,16 @@ fusedSandwichNormScalarRegKernel(
         float const f = to_float(a[k]);
         ss += f * f;
     }
+
+    T r[ITERS];
+    #pragma unroll
+    for (int k = 0; k < ITERS; ++k)
+    {
+        r[k] = residual_in[row + tid + k * THREADS];
+    }
+
     float const inv1 = rsqrtf(blockSumAll<NUM_WARPS>(ss, red1) * INV_HIDDEN_DIM + eps);
 
-    // 2. Post-attention RMSNorm + Residual addition in-registers, store updated residual, accumulate pre-MoE variance
     ss = 0.f;
     #pragma unroll
     for (int k = 0; k < ITERS; ++k)
@@ -109,9 +97,16 @@ fusedSandwichNormScalarRegKernel(
 
         ss += res_val * res_val;
     }
+
+    T g2[ITERS];
+    #pragma unroll
+    for (int k = 0; k < ITERS; ++k)
+    {
+        g2[k] = gamma2[tid + k * THREADS];
+    }
+
     float const inv2 = rsqrtf(blockSumAll<NUM_WARPS>(ss, red2) * INV_HIDDEN_DIM + eps);
 
-    // 3. Pre-MoE RMSNorm in-registers, store moe_in
     #pragma unroll
     for (int k = 0; k < ITERS; ++k)
     {
